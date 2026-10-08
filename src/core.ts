@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { mkdir, mkdtemp, rm, stat, rename, writeFile } from "node:fs/promises";
+import { existsSync, statSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { renderViral, transcribeLocal, WHISPER_MODEL } from "./viral.js";
@@ -143,6 +144,22 @@ export const limiter = new Semaphore(
 );
 
 // ---------- process helpers ----------
+
+/**
+ * Finds an executable on PATH without shelling out to `which` (absent on
+ * Windows). Honours PATHEXT, so `claude` finds npm's `claude.cmd` shim.
+ */
+export function resolveCommand(bin: string): string | undefined {
+  const exts = process.platform === "win32" ? ["", ...(process.env.PATHEXT ?? ".EXE;.CMD;.BAT;.COM").split(";")] : [""];
+  for (const dir of (process.env.PATH ?? "").split(path.delimiter).filter(Boolean))
+    for (const ext of exts) {
+      const f = path.join(dir, bin + ext);
+      if (existsSync(f) && statSync(f).isFile()) return f;
+    }
+  return undefined;
+}
+
+export const hasCommand = (bin: string) => resolveCommand(bin) !== undefined;
 
 export function exec(cmd: string, args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {

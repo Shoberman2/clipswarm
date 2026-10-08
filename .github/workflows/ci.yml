@@ -5,10 +5,16 @@ on:
   pull_request:
 jobs:
   test:
-    runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        node: [20, 22, 24]
+        include:
+          - { os: ubuntu-latest, node: 20 }
+          - { os: ubuntu-latest, node: 22 }
+          - { os: ubuntu-latest, node: 24 }
+          - { os: macos-latest, node: 22 }
+          - { os: windows-latest, node: 22 }
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -16,9 +22,28 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: npm
       - name: Install ffmpeg (for the render test)
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+        shell: bash
+        run: |
+          case "$RUNNER_OS" in
+            Linux)   sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg ;;
+            macOS)   brew install ffmpeg ;;
+            Windows) choco install ffmpeg -y --no-progress ;;
+          esac
       - run: npm ci
       - run: npm run build
       - run: npm test
       - name: CLI smoke test
-        run: node dist/cli.js --help | grep -q clipswarm
+        shell: bash
+        run: |
+          node dist/cli.js --help | grep -q clipswarm
+          node dist/cli.js setup || true
+      - name: Scheduler install / status / uninstall (Windows Task Scheduler)
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
+          CLIPSWARM_HOME: ${{ runner.temp }}/clipswarm-home
+        run: |
+          node dist/cli.js watch install
+          node dist/cli.js watch status | grep -q "is installed"
+          node dist/cli.js watch uninstall
+          node dist/cli.js watch status | grep -q "Not installed"

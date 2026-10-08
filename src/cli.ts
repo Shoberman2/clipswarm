@@ -2,7 +2,7 @@
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { createClips, exec, formatTime, getTranscript, getVideoInfo, searchTranscript, type ClipJob } from "./core.js";
+import { createClips, formatTime, hasCommand, getTranscript, getVideoInfo, searchTranscript, type ClipJob } from "./core.js";
 import { startMcpServer } from "./mcp.js";
 
 const HELP = `clipswarm — parallel YouTube clipping for humans and AI agents
@@ -186,10 +186,21 @@ async function setup() {
   const { WHISPER_MODEL } = await import("./viral.js");
   const { existsSync } = await import("node:fs");
   const { mkdir, rename } = await import("node:fs/promises");
-  for (const [bin, hint] of [["yt-dlp", "brew install yt-dlp  |  pip install -U yt-dlp"], ["ffmpeg", "brew install ffmpeg  |  apt install ffmpeg"], ["whisper-cli", "brew install whisper-cpp  (optional: captions for live streams)"]]) {
-    const ok = await exec("which", [bin]).then(() => true, () => false);
-    console.log(`${ok ? "✓" : "✗"} ${bin}${ok ? "" : `  →  ${hint}`}`);
+  const win = process.platform === "win32";
+  const checks: [string, string, boolean][] = [
+    ["yt-dlp", win ? "winget install yt-dlp.yt-dlp" : "brew install yt-dlp  |  pip install -U yt-dlp", true],
+    ["ffmpeg", win ? "winget install Gyan.FFmpeg" : "brew install ffmpeg  |  sudo apt install ffmpeg", true],
+    ["whisper-cli", win ? "download a whisper.cpp release (optional: captions for live streams)" : "brew install whisper-cpp  (optional: captions for live streams)", false],
+    ["claude", "npm i -g @anthropic-ai/claude-code  (optional: AI-picked moments for watches)", false],
+  ];
+  let missing = false;
+  for (const [bin, hint, required] of checks) {
+    const ok = hasCommand(bin);
+    if (!ok && required) missing = true;
+    console.log(`${ok ? "✓" : required ? "✗" : "–"} ${bin}${ok ? "" : `  →  ${hint}`}`);
   }
+  if (missing) process.exitCode = 1;
+  if (!hasCommand("whisper-cli") && !hasCommand("whisper-cpp")) return console.log("Skipping the whisper model (whisper.cpp not installed).");
   if (existsSync(WHISPER_MODEL)) return console.log(`✓ whisper model at ${WHISPER_MODEL}`);
   console.log(`Downloading whisper model (~140MB) to ${WHISPER_MODEL} ...`);
   const res = await fetch("https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin");

@@ -492,6 +492,7 @@ async function notify(message: string) {
 // ---------- scheduling ----------
 
 const LABEL = "dev.clipswarm.watch";
+const WIN_TASK = "clipswarm-watch";
 const PLIST = path.join(os.homedir(), "Library", "LaunchAgents", `${LABEL}.plist`);
 
 /**
@@ -501,6 +502,14 @@ const PLIST = path.join(os.homedir(), "Library", "LaunchAgents", `${LABEL}.plist
  */
 export async function installScheduler(cliPath: string, checkEveryMin = 5): Promise<string> {
   const args = [process.execPath, cliPath, "watch", "run"];
+  if (process.platform === "win32") {
+    await mkdir(HOME, { recursive: true });
+    // Task Scheduler runs the command through cmd, which handles the log redirect.
+    const log = path.join(HOME, "watch.log");
+    const tr = `cmd /c ""${process.execPath}" "${cliPath}" watch run >> "${log}" 2>&1"`;
+    await exec("schtasks", ["/Create", "/F", "/SC", "MINUTE", "/MO", String(checkEveryMin), "/TN", WIN_TASK, "/TR", tr]);
+    return `Installed scheduled task "${WIN_TASK}": checks every ${checkEveryMin} min. Log: ${log}`;
+  }
   if (process.platform !== "darwin")
     return `Add this line with \`crontab -e\`:\n*/${checkEveryMin} * * * * PATH=${process.env.PATH} ${args.join(" ")} >> ${path.join(HOME, "watch.log")} 2>&1`;
   const xml = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;");
@@ -532,6 +541,10 @@ export async function installScheduler(cliPath: string, checkEveryMin = 5): Prom
 }
 
 export async function uninstallScheduler(): Promise<string> {
+  if (process.platform === "win32") {
+    await exec("schtasks", ["/Delete", "/F", "/TN", WIN_TASK]).catch(() => {});
+    return `Removed scheduled task "${WIN_TASK}".`;
+  }
   if (process.platform !== "darwin") return "Remove the clipswarm line with `crontab -e`.";
   const uid = String(process.getuid?.() ?? 501);
   await exec("launchctl", ["bootout", `gui/${uid}`, PLIST]).catch(() => {});
@@ -540,6 +553,10 @@ export async function uninstallScheduler(): Promise<string> {
 }
 
 export async function schedulerStatus(): Promise<{ installed: boolean; detail: string }> {
+  if (process.platform === "win32") {
+    const ok = await exec("schtasks", ["/Query", "/TN", WIN_TASK]).then(() => true, () => false);
+    return { installed: ok, detail: ok ? `Scheduled task "${WIN_TASK}" is installed.` : "Not installed. Run `clipswarm watch install`." };
+  }
   if (process.platform !== "darwin") return { installed: false, detail: "Check `crontab -l` for a clipswarm line." };
   if (!existsSync(PLIST)) return { installed: false, detail: "Not installed. Run `clipswarm watch install`." };
   const uid = String(process.getuid?.() ?? 501);

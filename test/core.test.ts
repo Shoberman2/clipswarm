@@ -153,3 +153,23 @@ test("widescreen: header above the video, captions below, nothing overlapping", 
   assert.ok(l.captionY >= l.videoTop + l.fgH);
   assert.ok(l.captionY + 360 <= 1920);
 });
+
+import { resolveCommand } from "../src/core.js";
+import { mkdtempSync, writeFileSync, chmodSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+test("resolveCommand finds executables on PATH (incl. Windows .cmd shims) without `which`", () => {
+  const dir = mkdtempSync(join(tmpdir(), "clipswarm-bin-"));
+  const name = process.platform === "win32" ? "fakebin.cmd" : "fakebin";
+  writeFileSync(join(dir, name), process.platform === "win32" ? "@echo off\r\n" : "#!/bin/sh\n");
+  chmodSync(join(dir, name), 0o755);
+  const saved = process.env.PATH;
+  try {
+    process.env.PATH = dir;
+    assert.equal(resolveCommand("fakebin")?.toLowerCase(), join(dir, name).toLowerCase());
+    assert.equal(resolveCommand("definitely-not-installed-xyz"), undefined);
+  } finally {
+    process.env.PATH = saved;
+  }
+});

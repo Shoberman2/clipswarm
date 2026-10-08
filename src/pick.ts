@@ -4,7 +4,7 @@
  * free transcript heuristic.
  */
 import { spawn } from "node:child_process";
-import { formatTime, type TranscriptSegment } from "./core.js";
+import { formatTime, resolveCommand, type TranscriptSegment } from "./core.js";
 
 export interface Moment {
   start: number;
@@ -19,21 +19,21 @@ export interface Moment {
 let claudeAvailable: Promise<boolean> | undefined;
 
 export function hasClaudeCli(): Promise<boolean> {
-  claudeAvailable ??= new Promise((resolve) => {
-    const p = spawn("claude", ["--version"], { stdio: "ignore" });
-    p.on("error", () => resolve(false));
-    p.on("close", (code) => resolve(code === 0));
-  });
+  claudeAvailable ??= Promise.resolve(resolveCommand("claude") !== undefined);
   return claudeAvailable;
 }
 
 function runClaude(prompt: string, timeoutMs: number): Promise<string> {
   return new Promise((resolve, reject) => {
     // No tools, no MCP servers, no saved session: a single pure-text answer.
+    // npm installs `claude` as a .cmd shim on Windows, which Node can only launch via a shell.
+    // All args are constants (the prompt goes over stdin), so the shell is safe here.
+    const bin = resolveCommand("claude") ?? "claude";
+    const shell = process.platform === "win32" && /\.(cmd|bat)$/i.test(bin);
     const p = spawn(
-      "claude",
-      ["-p", "--output-format", "json", "--tools", "", "--strict-mcp-config", "--no-session-persistence"],
-      { stdio: ["pipe", "pipe", "pipe"] },
+      shell ? `"${bin}"` : bin,
+      ["-p", "--output-format", "json", "--tools", shell ? '""' : "", "--strict-mcp-config", "--no-session-persistence"],
+      { stdio: ["pipe", "pipe", "pipe"], shell },
     );
     let out = "";
     let err = "";

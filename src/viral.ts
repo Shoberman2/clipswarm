@@ -13,7 +13,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import opentype from "opentype.js";
 import { Resvg } from "@resvg/resvg-js";
-import { exec, withRetry, ytdlp, type Word } from "./core.js";
+import { exec, hasCommand, withRetry, ytdlp, type Word } from "./core.js";
 
 export interface ViralOptions {
   /** Header hook text. Omit or "" for no header. */
@@ -200,13 +200,7 @@ export const WHISPER_MODEL =
   process.env.CLIPSWARM_WHISPER_MODEL ?? path.join(os.homedir(), ".cache", "clipswarm", "ggml-base.en.bin");
 
 async function findWhisper(): Promise<string | undefined> {
-  for (const bin of ["whisper-cli", "whisper-cpp"]) {
-    try {
-      await exec("which", [bin]);
-      return bin;
-    } catch {}
-  }
-  return undefined;
+  return ["whisper-cli", "whisper-cpp"].find(hasCommand);
 }
 
 /**
