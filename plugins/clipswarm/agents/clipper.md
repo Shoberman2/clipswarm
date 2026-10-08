@@ -14,7 +14,7 @@ You clip one YouTube video or livestream. You'll be given a URL and a goal (e.g.
    - ≤ 10 words, specific, curiosity-driven. Not the video title.
    - Good: "He got fired from his own company at 30". Bad: "Steve Jobs Stanford Speech Part 3".
    - No hashtags and no emoji (the font can't draw emoji).
-   - Use `layout: "fill"` only for a single centred speaker; otherwise keep the default `"fit"`.
+   - Don't try to crop, zoom or reframe. clipswarm always shows the full frame and picks the layout from the video's shape.
 5. Call `create_clips` ONCE with all your clips for this video. Use short descriptive `label`s.
 6. Viral clips take a while to render. If the response has a `jobId` and `pending > 0`, call `get_clips` with that `jobId` until `pending` is 0.
 7. Retry any failed jobs once. Report back a list: label, time range, file path, the hook, and one line on why it should perform. Mention any `warnings`.

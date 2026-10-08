@@ -11,7 +11,7 @@ clipswarm is small on purpose: about 1,300 lines of TypeScript that coordinate t
  clipper agent 2 ─┼─ MCP over stdio ─► mcp.ts ──► core.ts ──┬─► yt-dlp ───► section / HLS URLs
  clipper agent N ─┘   (JSON-RPC)        (zod     createClips│   (-J metadata, --download-sections)
                                         schemas)      │     ├─► fetch() ───► json3 captions, HLS segments
-       you ──────► cli.ts ────────────────────────────┘     ├─► ffmpeg ────► cut / crop / composite
+       you ──────► cli.ts ────────────────────────────┘     ├─► ffmpeg ────► cut / fit / composite
                                                             └─► viral.ts ──► whisper.cpp, opentype.js + resvg
                                                                      │
                                          one shared Semaphore ───────┘      ──► clips/*.mp4
@@ -83,7 +83,7 @@ All three cases start the same way. The agent calls `create_clips`, `mcp.ts` cal
    - Format selection prefers mp4+m4a at or below `maxHeight` (default 1080).
    - `--download-sections "*start-end"` makes yt-dlp's ffmpeg fetch just that range, so a 30s clip from a 3h video downloads about 30s.
    - `--force-keyframes-at-cuts` gives frame-accurate edges.
-5. **Optional vertical crop.** With `vertical: true`, ffmpeg applies `VERTICAL_FILTER`: a centre crop to 9:16, then a scale to 1080x1920. It writes to `.tmp.mp4` and renames, so a half-written file never sits at the final path.
+5. **Optional vertical version.** With `vertical: true`, ffmpeg applies `VERTICAL_FILTER`: scale the whole frame to fit 1080x1920 and pad with black. It never crops. It writes to `.tmp.mp4` and renames, so a half-written file never sits at the final path.
 6. Returns a `ClipResult` with `path`, `bytes`, `durationSec`, `sourceStart` and `videoTitle`.
 
 ### (b) Clip from a livestream
@@ -107,7 +107,7 @@ When `info.is_live` is set, `createClip` hands off to `createLiveClip` (`src/cor
 5. **Download** (`downloadSegments`, `src/core.ts:541`). Eight workers per track fetch segments with `withRetry`, then concatenate them into `v.ts` and `a.ts` in a temp dir.
 6. **Cut** with ffmpeg (`src/core.ts:158`):
    - **Default: stream copy.** `-c:v copy` is fast, but the clip starts at the first selected segment's beginning (`from = vSel[0].start`), up to ~5s early.
-   - **`precise` or `vertical`:** re-encodes with libx264, seeks with `-ss` to the exact start, and applies the crop if requested.
+   - **`precise` or `vertical`:** re-encodes with libx264, seeks with `-ss` to the exact start, and applies the vertical fit if requested.
 
    Audio is always re-encoded to AAC 160k with `+faststart`.
 7. **Report the real range.** `live.from` / `live.to` are ISO wall-clock times computed from `pdt`. A stream-copied clip therefore says honestly where it actually begins.
@@ -124,7 +124,7 @@ When `info.is_live` is set, `createClip` hands off to `createLiveClip` (`src/cor
      - Words are re-based so the clip starts at 0.
    - **Live clips, or no captions:** `transcribeLocal` (`src/viral.ts:216`) extracts 16kHz mono WAV with ffmpeg and runs `whisper-cli -ml 1 -sow -oj` (one word per segment, JSON output). Markers like `[BLANK_AUDIO]` and `♪♪` are filtered out. If whisper or the model is missing it returns `undefined`, and the clip renders without captions plus a `warnings` entry telling you to run `clipswarm setup`.
 3. **Render** (`renderViral`, `src/viral.ts:268`, inside one limiter slot):
-   - **Geometry.** `probe` reads the source size. In `fit` layout the frame is scaled to 1080 wide and centred on a blurred copy of itself: downscale to 270x480, `gblur`, upscale, darken. `fill` crops to 9:16. Sources that would be taller than 1100px when scaled are treated as `fill` automatically.
+   - **Geometry.** `computeLayout` (`src/viral.ts:285`) scales the whole frame to fit 1080x1920 at its own aspect ratio and never crops. If the header, video and captions fit stacked, it centres them as a group (wide sources). Otherwise it centres the video and lays the text over it (tall sources). The background is padded solid colour (default black); `background: "blur"` is opt-in.
    - **Header.** `renderHeader` returns a PNG. It's added with `-loop 1` and overlaid above the video with `shortest=1`.
    - **Captions.** `buildCaptionFrames` (`src/viral.ts:167`) groups words into chunks. A new chunk starts at 3 words, at more than 18 characters, after a pause over 0.6s, or after punctuation. Each word gets one frame with that word highlighted. `renderViral` writes one PNG per frame, plus `blank.png` for gaps, and an `ffconcat` list with per-file `duration`s. That list becomes a single image-sequence input through ffmpeg's **concat demuxer**, overlaid with `eof_action=pass`. The last entry is repeated because the concat demuxer ignores the final file's duration.
    - **Encode.** `videoEncoder` (`src/viral.ts:242`) uses `h264_videotoolbox` at 10 Mbps on macOS when ffmpeg has it (several times faster) and falls back to `libx264 -preset veryfast -crf 21` elsewhere. The output is trimmed with `-t` to the source duration.
@@ -134,7 +134,7 @@ When `info.is_live` is set, `createClip` hands off to `createLiveClip` (`src/cor
 
 - **One shared `Semaphore`** (`src/core.ts:110`, `limiter` at `:124`). This is a module-level singleton, so every MCP call from every agent shares it. The default is `min(6, max(2, cpus))`, overridable with `CLIPSWARM_CONCURRENCY`. It wraps:
   - `yt-dlp -J`
-  - each VOD download+crop
+  - each VOD download + vertical fit
   - each live segment download+cut
   - each viral render
 
@@ -163,7 +163,7 @@ When `info.is_live` is set, `createClip` hands off to `createLiveClip` (`src/cor
 `npm test` runs `tsx --test test/*.test.ts`. CI (`.github/workflows/ci.yml`) builds and tests on Node 20, 22 and 24, then smoke-tests `node dist/cli.js --help`.
 
 - `test/core.test.ts` covers the pure logic: time parsing and round-trips, range validation without network, `parsePlaylist` (sequence numbers, offsets, wall clock), `resolveLiveTime`, the opentype NaN guard, header/caption PNG output, `fitText` truncation, and caption chunking.
-- `test/render.test.ts` builds a synthetic 3s clip with lavfi, runs `renderViral` in both layouts, and checks for 1080x1920 output with audio and the right duration. It is skipped if ffmpeg is missing.
+- `test/render.test.ts` builds a synthetic 3s clip with lavfi, runs `renderViral` with a solid and a blurred background, and checks for 1080x1920 output with audio and the right duration. It is skipped if ffmpeg is missing.
 - Nothing in the suite touches YouTube. Network paths are tested by hand (`npm run dev -- clip <url> 0:10 0:20`).
 
 ## Distribution
@@ -180,7 +180,7 @@ When `info.is_live` is set, `createClip` hands off to `createLiveClip` (`src/cor
 - **YouTube only, in practice.** The live path assumes YouTube's HLS layout, and caption parsing assumes json3. Other yt-dlp sites may work for plain VOD clips.
 - **Transcripts aren't available while a stream is live.** Agents have to clip live streams by time. Viral live clips need whisper.cpp for captions.
 - **The DVR window is about an hour**, and that limit is set by YouTube.
-- **Vertical crop is a fixed centre crop** (`VERTICAL_FILTER`), and `fill` uses a centre crop too.
+- **Wide videos get small on a phone.** Because nothing is ever cropped, a 16:9 source fills only the middle third of the 9:16 frame. That's a deliberate trade-off: never hide relevant content.
 - **Captions use one font and one style.** Glyphs the font doesn't have (emoji, CJK) are dropped by `sanitize`.
 - **Some light work bypasses the limiter.** Caption PNG rendering and HLS playlist fetches run outside it (whisper.cpp transcription and all ffmpeg/yt-dlp work go through it).
 - **Caches never evict VOD entries.** That's fine for a per-session MCP process, but worth revisiting for long-lived servers.
@@ -188,7 +188,6 @@ When `info.is_live` is set, `createClip` hands off to `createLiveClip` (`src/cor
 
 ## Where to add things
 
-- **Face-tracked vertical crop.** Replace the constant `VERTICAL_FILTER` (`src/core.ts:454`) and the `fill` branch in `renderViral` (`src/viral.ts:268`) with a crop computed per clip, for example from a detection pass that produces a `crop=...:x=...` expression or a `sendcmd` track. Add an option to `ClipJob` and to the `create_clips` zod schema.
 - **New caption styles.** Add a field to `ViralOptions` (`src/viral.ts:18`), `ClipJob` and the zod schema. Branch in `renderCaption` (the drawing) and/or `buildCaptionFrames` (the chunking and timing). The concat-demuxer pipeline doesn't care what the PNGs look like. For new header looks, edit `renderHeader`.
 - **New fonts.** Drop the `.ttf` into `assets/fonts/` (with its licence) or point `CLIPSWARM_FONT` at it.
 - **New MCP tools.** Register them in `startMcpServer`. Return compact text, and route errors through `fail`.

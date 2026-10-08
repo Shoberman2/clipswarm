@@ -114,15 +114,15 @@ export async function startMcpServer(defaultOutDir: string) {
               start: time,
               end: time,
               label: z.string().optional().describe("Short name used for the output file"),
-              vertical: z.boolean().optional().describe("Crop to 9:16 for Shorts/Reels/TikTok"),
+              vertical: z.boolean().optional().describe("Plain 9:16 version: whole frame on black, no header/captions"),
               maxHeight: z.number().optional().describe("Max resolution height, default 1080"),
               style: z
                 .enum(["plain", "viral"])
                 .optional()
-                .describe('"viral" = ready-to-post 1080x1920 short: hook header + video on blurred backdrop + word-by-word captions'),
+                .describe('"viral" = ready-to-post 1080x1920 short: hook header + the full video frame (never cropped, laid out to suit its shape) + word-by-word captions'),
               title: z.string().optional().describe("Viral: the header hook (write a punchy one, ≤ ~10 words). Defaults to the video title"),
               captions: z.boolean().optional().describe("Viral: animated captions, default true"),
-              layout: z.enum(["fit", "fill"]).optional().describe('Viral: "fit" (default) shows the whole frame; "fill" crops to fill 9:16 (best for a single centred speaker)'),
+              background: z.string().optional().describe('Viral: background colour behind the video, default "#000000". The full frame is always shown, never cropped.'),
               accent: z.string().optional().describe('Viral: highlight colour for the spoken word, default "#FFE600"'),
               precise: z.boolean().optional().describe("Live only: frame-accurate cut (slower re-encode). Default snaps start to a keyframe ≤5s earlier."),
             }),

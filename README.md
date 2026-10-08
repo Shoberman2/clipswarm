@@ -18,7 +18,7 @@
 
 OpusClip-style apps decide for you what's "viral". clipswarm gives **your agent** the tools to decide, then does the production work:
 
-- **Viral format built in**: 1080×1920, a hook header card, the video on a blurred backdrop (or a full-bleed crop), and animated captions that highlight each word as it's spoken.
+- **Viral format built in**: 1080×1920, a hook header card, the **whole** video frame (never cropped or zoomed), and animated captions that highlight each word as it's spoken. The layout adapts to the source's shape.
 - **YouTube videos *and* live streams**: clip what just happened on a live stream (`start: -60, end: "now"`), or what aired at 8:41pm.
 - **Captions from real word timings**: YouTube's auto-captions for regular videos, and local [whisper.cpp](https://github.com/ggml-org/whisper.cpp) for live streams. Free and offline.
 - **Built for swarms**: dozens of parallel jobs across many videos and many simultaneous agents, all through one shared queue. Transcripts are fetched once per video, and one bad job never sinks a batch.
@@ -73,9 +73,17 @@ Each `clipper` agent reads its video's transcript, picks self-contained moments,
 |---|---|---|
 | `style` | `"plain"` | `"viral"` for the 9:16 format |
 | `title` | video title | The header hook. Agents should write a punchy one (≤10 words); `""` for no header |
-| `layout` | `"fit"` | `"fit"`: whole frame on a blurred backdrop, header above, captions below. `"fill"`: crop to 9:16 (best for one centred speaker) |
+| `background` | `"#000000"` | Colour behind the video (or `"blur"`) |
 | `captions` | `true` | Word-by-word captions, 1–3 words at a time, current word highlighted |
 | `accent` | `"#FFE600"` | Highlight colour |
+
+**The full frame is always shown.** clipswarm never crops or zooms, because what matters in a video (a spreadsheet, a chart, a second speaker) can be anywhere in the frame. The layout follows the source:
+
+| Source | Layout |
+|---|---|
+| Widescreen (16:9, screen recordings, podcasts) | Full width, header above, captions below, centred on black |
+| Vertical (9:16 Shorts, phone video) | Fills the frame; header and captions sit over the video |
+| Square / 4:3 / anything else | Scaled as large as fits, nothing cut off |
 
 Captions come from YouTube's auto-captions (exact per-word timing) for regular videos, and from local whisper.cpp for live streams or videos without captions. If neither is available, the clip still renders and the result includes a `warnings` entry explaining why.
 
@@ -99,7 +107,7 @@ Paste a link to a stream that's live right now (a `watch?v=` or a channel's `/li
 2. **Cut it.**
    - **Regular videos:** yt-dlp downloads only the requested section.
    - **Live streams:** clipswarm reads YouTube's rolling HLS playlist (5-second segments with wall-clock stamps) and fetches just the segments covering your range.
-3. **Make it viral.** clipswarm gets word timings and draws the header and caption frames (font → vector paths → PNG). ffmpeg composites them over the video on a blurred 9:16 canvas.
+3. **Make it viral.** clipswarm gets word timings and draws the header and caption frames (font → vector paths → PNG). ffmpeg composites them with the full, uncropped video on a 9:16 canvas.
 4. **Share the machine.** Every job from every agent goes through one concurrency limiter, with retries for YouTube's intermittent 403s.
 
 Contributors: see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for a full walkthrough of the code.
@@ -111,7 +119,7 @@ Contributors: see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for a full walkth
 | `get_video_info` | Title, channel, duration, chapters, `liveStatus` |
 | `get_transcript` | Timestamped transcript as compact `[m:ss] text` lines, optionally windowed with `from`/`to` |
 | `search_transcript` | Where a phrase is said, as padded time windows ready to clip |
-| `create_clips` | Cuts many clips in parallel across any number of videos, live or not. Options: `style`, `title`, `layout`, `captions`, `accent`, `label`, `vertical`, `maxHeight`, `precise` |
+| `create_clips` | Cuts many clips in parallel across any number of videos, live or not. Options: `style`, `title`, `captions`, `accent`, `background`, `label`, `vertical`, `maxHeight`, `precise` |
 | `get_clips` | Collects results from a batch still rendering. `create_clips` returns after ~40s with a `jobId` so MCP clients' ~60s timeouts never kill long batches |
 
 ## CLI
@@ -130,9 +138,9 @@ clipswarm setup
 
 | Env var | Default | |
 |---|---|---|
-| `CLIPSWARM_CONCURRENCY` | `min(6, cpus)` | Max simultaneous download/encode jobs, shared across all callers |
-| `CLIPSWARM_MAX_CLIP_SEC` | `600` | Guards against accidentally downloading whole videos |
-| `CLIPSWARM_RETRIES` | `3` | Retries for transient YouTube errors |
+| `CLIPSWARM_CONCURRENCY` | `min(6, cpus)` | Max simultaneous download/encode jobs, shared across all callers; must be a positive integer |
+| `CLIPSWARM_MAX_CLIP_SEC` | `600` | Guards against accidentally downloading whole videos; must be greater than 0 |
+| `CLIPSWARM_RETRIES` | `3` | Retries for transient YouTube errors; must be a non-negative integer |
 | `CLIPSWARM_WHISPER_MODEL` | `~/.cache/clipswarm/ggml-base.en.bin` | Any whisper.cpp model, e.g. a multilingual one |
 | `CLIPSWARM_FONT` | bundled Montserrat Black | Any TTF/OTF for headers and captions |
 
@@ -144,7 +152,6 @@ Only clip content you have the rights to use: your own videos, content you've li
 
 Driven by what users ask for. Open an issue.
 
-- [ ] Face-tracked crop for `layout: "fill"`
 - [ ] More caption styles (karaoke boxes, emoji, per-word pop)
 - [ ] Local files and other platforms (most yt-dlp sites already work)
 - [ ] Optional hosted mode / HTTP transport for remote agents

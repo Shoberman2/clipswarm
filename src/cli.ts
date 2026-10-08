@@ -8,7 +8,7 @@ const HELP = `clipswarm — parallel YouTube clipping for humans and AI agents
 
 Usage:
   clipswarm clip <url> <start> <end> [--label name] [--out dir]
-      [--viral] [--title "hook text"] [--layout fit|fill] [--no-captions] [--accent "#FFE600"]
+      [--viral] [--title "hook text"] [--no-captions] [--accent "#FFE600"] [--background "#000000"|blur]
       [--vertical] [--precise]
   clipswarm batch <jobs.json> [--out dir]       Run many clips concurrently
   clipswarm info <url>                          Title, duration, chapters
@@ -62,7 +62,7 @@ async function main() {
         style: flags.viral ? "viral" : undefined,
         title: str("title"),
         captions: flags["no-captions"] ? false : undefined,
-        layout: str("layout") as ClipJob["layout"],
+        background: str("background"),
         accent: str("accent"),
       };
       return report(await createClips([job], outDir), outDir);

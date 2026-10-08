@@ -25,9 +25,9 @@ test("renderViral produces a 1080x1920 clip with audio", { skip: !hasFfmpeg && "
     "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", "-shortest", src,
   ]);
   const words = "this is a viral clip test".split(" ").map((text, i) => ({ start: 0.2 + i * 0.4, end: 0.55 + i * 0.4, text }));
-  for (const layout of ["fit", "fill"] as const) {
-    const out = path.join(dir, `out-${layout}.mp4`);
-    await renderViral(src, out, words, { title: "A hook header that wraps onto two lines", layout });
+  for (const background of ["#000000", "blur"]) {
+    const out = path.join(dir, `out-${background.replace("#", "")}.mp4`);
+    await renderViral(src, out, words, { title: "A hook header that wraps onto two lines", background });
     const probe = execFileSync("ffprobe", ["-v", "error", "-show_entries", "stream=codec_type,width,height:format=duration", "-of", "json", out]).toString();
     const { streams, format } = JSON.parse(probe);
     const v = streams.find((s: { codec_type: string }) => s.codec_type === "video");

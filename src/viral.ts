@@ -1,6 +1,6 @@
 /**
- * "Viral" rendering: 1080x1920 with a hook header card, the source video on a
- * blurred backdrop, and word-by-word animated captions.
+ * "Viral" rendering: 1080x1920 with a hook header card, the whole source frame
+ * (never cropped), and word-by-word animated captions.
  *
  * Text is rendered here (font -> vector paths -> PNG) rather than with ffmpeg's
  * drawtext/subtitles filters, because many ffmpeg builds (including Homebrew's)
@@ -20,8 +20,8 @@ export interface ViralOptions {
   title?: string;
   /** Word-by-word captions. Default true. */
   captions?: boolean;
-  /** "fit" (default): whole frame on a blurred backdrop. "fill": crop to 9:16. */
-  layout?: "fit" | "fill";
+  /** Background behind the video: a hex colour (default "#000000") or "blur". */
+  background?: string;
   /** Highlight colour for the word being spoken. Default "#FFE600". */
   accent?: string;
   /** Seconds to drop from the start of the source (e.g. a live clip's keyframe lead-in). */
@@ -264,6 +264,44 @@ async function probe(file: string): Promise<{ width: number; height: number; dur
   };
 }
 
+export interface Layout {
+  /** Scaled video size and position. The video is never cropped. */
+  fgW: number;
+  fgH: number;
+  videoX: number;
+  videoTop: number;
+  headerY: number;
+  captionY: number;
+}
+
+const even = (n: number) => Math.round(n / 2) * 2;
+
+/**
+ * Places the video, header and captions for a source of any shape. The whole
+ * frame is always shown: wide videos sit full-width with the header above and
+ * captions below, grouped in the centre; tall videos fill the height with the
+ * text over them.
+ */
+export function computeLayout(width: number, height: number, headerH: number, captionH: number): Layout {
+  const ar = width / height;
+  const fgW = ar >= W / H ? W : Math.min(W, even(H * ar));
+  const fgH = ar >= W / H ? Math.min(H, even(W / ar)) : H;
+  const videoX = Math.round((W - fgW) / 2);
+  const gap = headerH ? 24 : 0;
+
+  if (headerH + gap + fgH + captionH <= H - 120) {
+    // Room for everything stacked: centre the group.
+    const top = Math.round((H - (headerH + gap + fgH + captionH)) / 2);
+    const videoTop = top + headerH + gap;
+    return { fgW, fgH, videoX, videoTop, headerY: top, captionY: videoTop + fgH };
+  }
+  // Tall video: centre it and lay text over it where there isn't free space.
+  const videoTop = Math.round((H - fgH) / 2);
+  const headerY = videoTop >= headerH + 40 ? videoTop - headerH - 16 : 150;
+  const captionY = H - videoTop - fgH >= captionH + 40 ? videoTop + fgH : Math.round(H * 0.62);
+  return { fgW, fgH, videoX, videoTop, headerY, captionY };
+}
+
 /** Composites a plain clip into the viral 9:16 format. */
 export async function renderViral(src: string, dest: string, words: Word[] | undefined, opts: ViralOptions): Promise<void> {
   const probed = await probe(src);
@@ -273,25 +311,27 @@ export async function renderViral(src: string, dest: string, words: Word[] | und
   const title = sanitize(opts.title ?? "");
   const tmp = await mkdtemp(path.join(os.tmpdir(), "clipswarm-viral-"));
   try {
-    // Geometry. "fit" keeps the whole frame, centred on a blurred copy of itself.
-    const fgH = Math.round((W / width) * height / 2) * 2;
-    const fill = opts.layout === "fill" || fgH > 1100; // vertical sources already fill the frame
-    const videoTop = fill ? 0 : Math.round((H - fgH) / 2);
     const header = title ? renderHeader(title) : undefined;
-    const headerY = fill ? 170 : Math.max(40, videoTop - (header?.height ?? 0) - 10);
-    const captionY = fill ? Math.round(H * 0.6) : Math.min(H - CAPTION_H - 80, videoTop + fgH + 20);
+    const frames = opts.captions === false || !words?.length ? [] : buildCaptionFrames(words, duration);
+    const { fgW, fgH, videoX, videoTop, headerY, captionY } = computeLayout(
+      width,
+      height,
+      header?.height ?? 0,
+      frames.length ? CAPTION_H : 0,
+    );
 
     const inputs: string[] = [...(trim > 0.01 ? ["-ss", trim.toFixed(3)] : []), "-i", src];
     const filters: string[] = [];
-    if (fill) {
-      filters.push(`[0:v]fps=${FPS},scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},setsar=1[v0]`);
-    } else {
+    if (opts.background === "blur") {
       filters.push(
         `[0:v]fps=${FPS},split=2[a][b]`,
-        `[a]scale=270:480:force_original_aspect_ratio=increase,crop=270:480,gblur=sigma=12,scale=${W}:${H},eq=brightness=-0.2:saturation=1.2[bg]`,
-        `[b]scale=${W}:${fgH}[fg]`,
-        `[bg][fg]overlay=0:${videoTop},setsar=1[v0]`,
+        `[a]scale=270:480:force_original_aspect_ratio=increase,crop=270:480,gblur=sigma=12,scale=${W}:${H},eq=brightness=-0.2[bg]`,
+        `[b]scale=${fgW}:${fgH}[fg]`,
+        `[bg][fg]overlay=${videoX}:${videoTop},setsar=1[v0]`,
       );
+    } else {
+      const color = /^#?[0-9a-f]{6}$/i.test(opts.background ?? "") ? opts.background!.replace("#", "") : "000000";
+      filters.push(`[0:v]fps=${FPS},scale=${fgW}:${fgH},setsar=1,pad=${W}:${H}:${videoX}:${videoTop}:color=0x${color}[v0]`);
     }
     let last = "v0";
     let n = 1;
@@ -303,7 +343,6 @@ export async function renderViral(src: string, dest: string, words: Word[] | und
       last = `v${n++}`;
     }
 
-    const frames = opts.captions === false || !words?.length ? [] : buildCaptionFrames(words, duration);
     if (frames.length) {
       await writeFile(path.join(tmp, "blank.png"), png(`<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${CAPTION_H}"/>`));
       const accent = opts.accent ?? "#FFE600";

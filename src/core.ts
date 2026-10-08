@@ -10,7 +10,7 @@ export interface ClipJob {
   end: string | number;
   /** Used for the output filename. Defaults to `<videoId>_<start>-<end>`. */
   label?: string;
-  /** Crop to 9:16 (1080x1920) for Shorts / Reels / TikTok. */
+  /** 9:16 (1080x1920) for Shorts / Reels / TikTok: the whole frame on black, never cropped. */
   vertical?: boolean;
   /** Max video height to download. Default 1080. */
   maxHeight?: number;
@@ -28,8 +28,8 @@ export interface ClipJob {
   title?: string;
   /** Viral only: animated captions. Default true. */
   captions?: boolean;
-  /** Viral only: "fit" (default) keeps the whole frame on a blurred backdrop; "fill" crops to 9:16. */
-  layout?: "fit" | "fill";
+  /** Viral only: background behind the video, a hex colour (default "#000000") or "blur". */
+  background?: string;
   /** Viral only: highlight colour for the spoken word. Default "#FFE600". */
   accent?: string;
 }
@@ -78,7 +78,15 @@ export interface VideoInfo {
   chapters: { title: string; start: number; end: number }[];
 }
 
-const MAX_CLIP_SEC = Number(process.env.CLIPSWARM_MAX_CLIP_SEC ?? 600);
+function numericEnv(name: string, fallback: number, valid: (value: number) => boolean, expected: string): number {
+  const raw = process.env[name];
+  if (raw === undefined) return fallback;
+  const value = Number(raw);
+  if (!valid(value)) throw new Error(`${name} must be ${expected}; got ${JSON.stringify(raw)}.`);
+  return value;
+}
+
+const MAX_CLIP_SEC = numericEnv("CLIPSWARM_MAX_CLIP_SEC", 600, (n) => Number.isFinite(n) && n > 0, "a finite number greater than 0");
 
 // ---------- time helpers ----------
 
@@ -126,7 +134,12 @@ class Semaphore {
 }
 
 export const limiter = new Semaphore(
-  Number(process.env.CLIPSWARM_CONCURRENCY ?? Math.max(2, Math.min(6, os.cpus().length))),
+  numericEnv(
+    "CLIPSWARM_CONCURRENCY",
+    Math.max(2, Math.min(6, os.cpus().length)),
+    (n) => Number.isInteger(n) && n > 0,
+    "a positive integer",
+  ),
 );
 
 // ---------- process helpers ----------
@@ -152,7 +165,7 @@ export function exec(cmd: string, args: string[]): Promise<string> {
   });
 }
 
-const RETRIES = Number(process.env.CLIPSWARM_RETRIES ?? 3);
+const RETRIES = numericEnv("CLIPSWARM_RETRIES", 3, (n) => Number.isInteger(n) && n >= 0, "a non-negative integer");
 
 /** YouTube intermittently 403s individual stream requests; a fresh attempt usually succeeds. */
 async function withRetry<T>(fn: () => Promise<T>): Promise<T> {
@@ -424,14 +437,18 @@ export async function createClip(job: ClipJob, outDir: string): Promise<ClipResu
         job.url,
       ]));
       if (job.vertical) {
-        await exec("ffmpeg", [
-          "-y", "-loglevel", "error", "-i", raw,
-          "-vf", VERTICAL_FILTER,
-          "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-c:a", "copy",
-          finalPath + ".tmp.mp4",
-        ]);
-        await rename(finalPath + ".tmp.mp4", finalPath);
-        await rm(raw, { force: true });
+        const rendered = finalPath + ".tmp.mp4";
+        try {
+          await exec("ffmpeg", [
+            "-y", "-loglevel", "error", "-i", raw,
+            "-vf", VERTICAL_FILTER,
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-c:a", "copy",
+            rendered,
+          ]);
+          await rename(rendered, finalPath);
+        } finally {
+          await Promise.all([rm(raw, { force: true }), rm(rendered, { force: true })]);
+        }
       }
     });
 
@@ -451,7 +468,8 @@ export async function createClip(job: ClipJob, outDir: string): Promise<ClipResu
   }
 }
 
-const VERTICAL_FILTER = "crop='min(iw,ih*9/16)':ih,scale=1080:1920";
+// Fit the whole frame into 9:16 and pad with black. Never crop: what matters may be anywhere in the frame.
+const VERTICAL_FILTER = "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1";
 
 function outputPath(job: ClipJob, info: RawInfo, outDir: string, range: string): string {
   const name = slug(job.label ?? `${info.id}_${range}`);
@@ -664,7 +682,7 @@ async function createViralClip(job: ClipJob, outDir: string): Promise<ClipResult
       renderViral(base.path!, dest, words, {
         title: job.title ?? base.videoTitle,
         captions: job.captions,
-        layout: job.layout,
+        background: job.background,
         accent: job.accent,
         trimStart: lead,
       }),

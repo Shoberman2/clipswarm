@@ -1,6 +1,23 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createClip, formatTime, parseTime } from "../src/core.js";
+
+for (const [name, value, message] of [
+  ["CLIPSWARM_CONCURRENCY", "0", "a positive integer"],
+  ["CLIPSWARM_MAX_CLIP_SEC", "NaN", "a finite number greater than 0"],
+  ["CLIPSWARM_RETRIES", "-1", "a non-negative integer"],
+] as const) {
+  test(`${name} rejects invalid values with a clear startup error`, () => {
+    const result = spawnSync(
+      process.execPath,
+      ["--import", "tsx", "--input-type=module", "-e", "await import('./src/core.ts')"],
+      { cwd: process.cwd(), encoding: "utf8", env: { ...process.env, [name]: value } },
+    );
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, new RegExp(`${name} must be ${message}`));
+  });
+}
 
 test("parseTime accepts seconds and timestamps", () => {
   assert.equal(parseTime(83), 83);
@@ -113,4 +130,26 @@ test("limiter never runs more than its max at once", async () => {
     ),
   );
   assert.ok(peak <= max, `peak ${peak} > max ${max}`);
+});
+
+import { computeLayout } from "../src/viral.js";
+
+test("layout never crops: the whole frame fits in 1080x1920 at its own aspect ratio", () => {
+  for (const [w, h] of [[1920, 1080], [1280, 720], [1080, 1920], [720, 1280], [1080, 1080], [640, 480], [2560, 1080], [600, 1400]]) {
+    for (const headerH of [0, 285]) {
+      const l = computeLayout(w, h, headerH, 360);
+      assert.ok(l.fgW <= 1080 && l.fgH <= 1920, `${w}x${h} overflows`);
+      assert.ok(l.videoX >= 0 && l.videoTop >= 0 && l.videoX + l.fgW <= 1080 && l.videoTop + l.fgH <= 1920, `${w}x${h} off-canvas`);
+      assert.ok(Math.abs(l.fgW / l.fgH - w / h) < 0.01, `${w}x${h} distorted`);
+      assert.ok(l.fgW === 1080 || l.fgH === 1920, `${w}x${h} not as large as possible`);
+    }
+  }
+});
+
+test("widescreen: header above the video, captions below, nothing overlapping", () => {
+  const l = computeLayout(1920, 1080, 285, 360);
+  assert.equal(l.fgW, 1080);
+  assert.ok(l.headerY + 285 <= l.videoTop);
+  assert.ok(l.captionY >= l.videoTop + l.fgH);
+  assert.ok(l.captionY + 360 <= 1920);
 });
