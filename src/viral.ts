@@ -196,6 +196,24 @@ export function buildCaptionFrames(words: Word[], duration: number): CaptionFram
 
 // ---------- local transcription (whisper.cpp) ----------
 
+/**
+ * Removes whisper's non-speech markers, which can span several word tokens:
+ * "[BLANK_AUDIO]", "(upbeat" + "music)", "♪♪", ">>".
+ */
+export function dropNonSpeech(words: Word[]): Word[] {
+  const out: Word[] = [];
+  let depth = 0;
+  for (const w of words) {
+    const opens = (w.text.match(/[[(]/g) ?? []).length;
+    const closes = (w.text.match(/[\])]/g) ?? []).length;
+    const inside = depth > 0 || opens > 0;
+    depth = Math.max(0, depth + opens - closes);
+    if (inside || !w.text || /^[♪♫\s]+$|^>+$/.test(w.text)) continue; // ">>" = speaker change
+    out.push(w);
+  }
+  return out;
+}
+
 export const WHISPER_MODEL =
   process.env.CLIPSWARM_WHISPER_MODEL ?? path.join(os.homedir(), ".cache", "clipswarm", "ggml-base.en.bin");
 
@@ -219,10 +237,9 @@ export async function transcribeLocal(videoPath: string): Promise<Word[] | undef
     const json = JSON.parse(await readFile(`${base}.json`, "utf8")) as {
       transcription: { offsets: { from: number; to: number }; text: string }[];
     };
-    return json.transcription
-      .map((t) => ({ start: t.offsets.from / 1000, end: t.offsets.to / 1000, text: t.text.trim() }))
-      // Drop non-speech markers: [BLANK_AUDIO], (music), ♪♪
-      .filter((w) => w.text && !/^\[.*\]$|^\(.*\)$|^[♪♫\s]+$/.test(w.text));
+    return dropNonSpeech(
+      json.transcription.map((t) => ({ start: t.offsets.from / 1000, end: t.offsets.to / 1000, text: t.text.trim() })),
+    );
   } finally {
     await rm(tmp, { recursive: true, force: true });
   }

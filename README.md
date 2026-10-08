@@ -4,7 +4,9 @@
 
 **Open-source, agent-native video clipping.** Point any number of AI agents at YouTube videos *or live streams*, and get ready-to-post viral shorts back: 9:16, a hook header, and word-by-word captions. Runs on your machine, with no API keys and no subscription.
 
-<p align="center"><img src="docs/demo.png" alt="Two example viral clips: a hook header card above the video, with yellow and green word-by-word captions" width="600"></p>
+<p align="center"><img src="docs/demo.gif" alt="A clipswarm viral clip: a white header card reading 'Astronauts celebrate July 4th from 250 miles up' above the full video of three astronauts on the ISS, with word-by-word captions below" width="300"></p>
+
+<p align="center"><sub>Made with one command: <code>clipswarm clip https://youtu.be/75-H-i9ctkE 6 14.4 --viral --title "Astronauts celebrate July 4th from 250 miles up"</code><br>Footage: NASA (public domain). No endorsement implied.</sub></p>
 
 ```
 "Get me the 3 best moments from each of these 10 podcasts as shorts"
@@ -195,6 +197,24 @@ Automatic clipping is on by default. The default `--picker auto` uses the local 
 | `CLIPSWARM_RETRIES` | `3` | Retries for transient YouTube errors; must be a non-negative integer |
 | `CLIPSWARM_WHISPER_MODEL` | `~/.cache/clipswarm/ggml-base.en.bin` | Any whisper.cpp model, e.g. a multilingual one |
 | `CLIPSWARM_FONT` | bundled Montserrat Black | Any TTF/OTF for headers and captions |
+
+## Platform support
+
+| | macOS | Linux | Windows |
+|---|---|---|---|
+| Clips, viral format, live streams | ✓ (hardware encoding) | ✓ | ✓ |
+| Watches | ✓ launchd | ✓ cron line printed by `watch install` | ✓ Task Scheduler |
+| Notifications | ✓ | – | – |
+
+CI runs the test suite (including a real ffmpeg render) on all three.
+
+## Known limitations
+
+- **YouTube changes break downloaders.** When clips start failing, update yt-dlp first (`yt-dlp -U`). clipswarm's error messages say so.
+- **Heavy use can get rate-limited.** YouTube sometimes returns HTTP 429 for captions after many requests. clipswarm retries, and falls back to transcribing audio locally with whisper.cpp.
+- **Live streams:** only about the last hour is available, and there's no transcript while live.
+- **"Most replayed" data** only appears on videos a few days old, so watches use AI picking first.
+- **Wide videos are small on a phone** because clipswarm never crops. This is deliberate: nothing relevant gets cut off.
 
 ## Responsible use
 

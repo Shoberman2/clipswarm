@@ -173,3 +173,10 @@ test("resolveCommand finds executables on PATH (incl. Windows .cmd shims) withou
     process.env.PATH = saved;
   }
 });
+
+import { dropNonSpeech } from "../src/viral.js";
+
+test("dropNonSpeech removes multi-token whisper markers", () => {
+  const ws = ["(upbeat", "music)", ">>", "Hello", "[BLANK_AUDIO]", "there", "♪♪", "(laughs)", "friend."].map((text, i) => ({ start: i, end: i + 1, text }));
+  assert.deepEqual(dropNonSpeech(ws).map((w) => w.text), ["Hello", "there", "friend."]);
+});

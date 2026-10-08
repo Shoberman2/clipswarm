@@ -1,0 +1,37 @@
+name: Bug report
+description: Something didn't work
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: "Most failures are fixed by updating yt-dlp (`yt-dlp -U` or `brew upgrade yt-dlp`). Please try that first."
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: The command or agent request, what you expected, and what you got (paste the error).
+    validations:
+      required: true
+  - type: input
+    id: url
+    attributes:
+      label: Video URL and timestamps (if relevant)
+  - type: textarea
+    id: setup
+    attributes:
+      label: Output of `npx clipswarm setup`
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: "`yt-dlp --version`, `ffmpeg -version | head -1`, `node -v`, OS"
+    validations:
+      required: true
+  - type: dropdown
+    id: client
+    attributes:
+      label: How were you using it?
+      options: [Claude Code, Claude Desktop, ChatGPT desktop / Codex, Cursor, VS Code, CLI, Other]
