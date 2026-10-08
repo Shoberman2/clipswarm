@@ -293,7 +293,7 @@ export async function createClip(job: ClipJob, outDir: string): Promise<ClipResu
     if (!isAbsolute(job.start) && !isAbsolute(job.end)) {
       const a = parseTime(job.start);
       const b = parseTime(job.end);
-      if (Math.sign(a) === Math.sign(b) || b === 0) checkLength(a, b, job);
+      if ((a >= 0 && b >= 0) || (a < 0 && b <= 0)) checkLength(a, b, job);
     }
 
     await mkdir(outDir, { recursive: true });
