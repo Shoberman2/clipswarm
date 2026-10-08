@@ -1,5 +1,7 @@
 # clipswarm
 
+[![CI](https://github.com/Shoberman2/clipswarm/actions/workflows/ci.yml/badge.svg)](https://github.com/Shoberman2/clipswarm/actions/workflows/ci.yml) [![npm](https://img.shields.io/npm/v/clipswarm)](https://www.npmjs.com/package/clipswarm) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 **Parallel YouTube clipping for AI agents.** An MCP server and CLI that let any number of agents find moments in YouTube videos and cut clips from them at the same time.
 
 ```
@@ -28,27 +30,33 @@ Requires Node 20+, [yt-dlp](https://github.com/yt-dlp/yt-dlp) and ffmpeg.
 
 ```bash
 brew install yt-dlp ffmpeg        # or: pip install -U yt-dlp && apt install ffmpeg
-git clone https://github.com/<you>/clipswarm && cd clipswarm
-npm install && npm run build
 ```
+
+Then add it to your agent. No clone needed:
+
+```bash
+claude mcp add clipswarm -- npx -y clipswarm mcp --out ./clips
+```
+
+Or install the CLI globally: `npm i -g clipswarm`.
 
 > Keep yt-dlp up to date (`yt-dlp -U` / `brew upgrade yt-dlp`). YouTube regularly breaks older versions. This is the #1 cause of failures.
 
 ## Use with Claude Code
 
-This repo ships a `.mcp.json` and a `clipper` subagent. Open the folder in Claude Code and ask:
+This repo ships a `.mcp.json` and a `clipper` subagent. Clone it (`git clone https://github.com/Shoberman2/clipswarm && cd clipswarm && npm install && npm run build`), open the folder in Claude Code and ask:
 
 > Spawn a clipper agent for each of these videos in parallel and get me 3 vertical clips of the strongest moments from each: <url1> <url2> <url3>
 
 Each `clipper` subagent reads its own video's transcript, picks moments, and calls `create_clips`. They all run at once against the same server.
 
-To use clipswarm from any project:
+To use the subagent in your own project, copy [`.claude/agents/clipper.md`](.claude/agents/clipper.md) into it.
 
-```bash
-claude mcp add clipswarm -- node /path/to/clipswarm/dist/cli.js mcp --out ./clips
+Other MCP clients (Claude Desktop, Cursor, …) use the same command: `npx -y clipswarm mcp`. For example, in Claude Desktop's config:
+
+```json
+{ "mcpServers": { "clipswarm": { "command": "npx", "args": ["-y", "clipswarm", "mcp", "--out", "/Users/you/clips"] } } }
 ```
-
-Other MCP clients (Claude Desktop, Cursor, …) use the same command: `node /path/to/clipswarm/dist/cli.js mcp`.
 
 ## MCP tools
 
@@ -92,4 +100,4 @@ Driven by what users ask for. Open an issue.
 
 ## License
 
-MIT
+MIT. See [CONTRIBUTING.md](CONTRIBUTING.md) to help out.

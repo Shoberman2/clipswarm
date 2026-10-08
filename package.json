@@ -34,9 +34,18 @@
   },
   "types": "dist/core.d.ts",
   "files": [
-    "dist"
+    "dist",
+    "!dist/**/*.test.*"
   ],
   "engines": {
     "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Shoberman2/clipswarm.git"
+  },
+  "homepage": "https://github.com/Shoberman2/clipswarm#readme",
+  "bugs": {
+    "url": "https://github.com/Shoberman2/clipswarm/issues"
   }
 }
