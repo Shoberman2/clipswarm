@@ -1,0 +1,21 @@
+[
+  {
+    "url": "https://www.youtube.com/watch?v=UF8uR6Z6KLc",
+    "start": "13:53",
+    "end": "14:28",
+    "label": "stay-hungry"
+  },
+  {
+    "url": "https://www.youtube.com/watch?v=UF8uR6Z6KLc",
+    "start": "0:20",
+    "end": "0:45",
+    "label": "intro",
+    "vertical": true
+  },
+  {
+    "url": "https://www.youtube.com/watch?v=UF8uR6Z6KLc",
+    "start": 300,
+    "end": 330,
+    "label": "story-two"
+  }
+]

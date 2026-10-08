@@ -1,0 +1,42 @@
+{
+  "name": "clipswarm",
+  "version": "0.1.0",
+  "description": "Parallel YouTube clipping for AI agents — MCP server + CLI built on yt-dlp and ffmpeg",
+  "main": "dist/core.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/cli.ts",
+    "test": "tsx --test test/*.test.ts",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "mcp",
+    "youtube",
+    "clips",
+    "yt-dlp",
+    "ffmpeg",
+    "agents",
+    "claude"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.4",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3"
+  },
+  "type": "module",
+  "bin": {
+    "clipswarm": "dist/cli.js"
+  },
+  "types": "dist/core.d.ts",
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=20"
+  }
+}
