@@ -7,7 +7,7 @@ import { startMcpServer } from "./mcp.js";
 const HELP = `clipswarm — parallel YouTube clipping for humans and AI agents
 
 Usage:
-  clipswarm clip <url> <start> <end> [--label name] [--vertical] [--out dir]
+  clipswarm clip <url> <start> <end> [--label name] [--vertical] [--precise] [--out dir]
   clipswarm batch <jobs.json> [--out dir]       Run many clips concurrently
   clipswarm info <url>                          Title, duration, chapters
   clipswarm transcript <url> [--lang en]        Timestamped transcript
@@ -16,7 +16,12 @@ Usage:
 
 jobs.json: [{ "url": "...", "start": "1:23", "end": "1:58", "label": "hook", "vertical": true }, ...]
 
+Live streams: times are relative to now, e.g. \`clipswarm clip <live-url> -60 now\` = the last minute.
+Negative times on regular videos count back from the end.
+
 Env: CLIPSWARM_CONCURRENCY (default min(6, cpus)), CLIPSWARM_MAX_CLIP_SEC (default 600)`;
+
+const BOOLEAN_FLAGS = new Set(["--vertical", "--precise"]);
 
 function parseArgs(argv: string[]) {
   const pos: string[] = [];
@@ -25,7 +30,7 @@ function parseArgs(argv: string[]) {
     const a = argv[i];
     if (a.startsWith("--")) {
       const next = argv[i + 1];
-      if (next !== undefined && !next.startsWith("--") && a !== "--vertical") flags[a.slice(2)] = argv[++i];
+      if (next !== undefined && !next.startsWith("--") && !BOOLEAN_FLAGS.has(a)) flags[a.slice(2)] = argv[++i];
       else flags[a.slice(2)] = true;
     } else pos.push(a);
   }
@@ -46,7 +51,7 @@ async function main() {
       const [url, start, end] = pos;
       if (!url || start === undefined || end === undefined) throw new Error("usage: clipswarm clip <url> <start> <end>");
       const label = typeof flags.label === "string" ? flags.label : undefined;
-      return report(await createClips([{ url, start, end, label, vertical: !!flags.vertical }], outDir), outDir);
+      return report(await createClips([{ url, start, end, label, vertical: !!flags.vertical, precise: !!flags.precise }], outDir), outDir);
     }
 
     case "batch": {

@@ -7,7 +7,11 @@ import { createClips, formatTime, getTranscript, getVideoInfo, parseTime, search
 const json = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] });
 const fail = (e: unknown) => ({ content: [{ type: "text" as const, text: `Error: ${(e as Error).message}` }], isError: true });
 
-const time = z.union([z.string(), z.number()]).describe('Seconds (83) or timestamp ("1:23", "1:02:03.5")');
+const time = z
+  .union([z.string(), z.number()])
+  .describe(
+    'Seconds (83) or "1:23" / "1:02:03.5". Negative = from the end ("-0:30"). For LIVE streams: "now", negative offsets from the live edge (-90), or ISO time ("2026-10-08T00:40:00Z"); roughly the last hour is available.',
+  );
 
 export async function startMcpServer(defaultOutDir: string) {
   const server = new McpServer({ name: "clipswarm", version: "0.1.0" });
@@ -15,7 +19,7 @@ export async function startMcpServer(defaultOutDir: string) {
   server.registerTool(
     "get_video_info",
     {
-      description: "Get a YouTube video's title, channel, duration and chapters. Use chapters to find natural clip boundaries.",
+      description: "Get a YouTube video's title, channel, duration, chapters and liveStatus (\"is_live\" means it's streaming now: clip it with times relative to \"now\"). Use chapters to find natural clip boundaries.",
       inputSchema: { url: z.string().describe("YouTube URL") },
     },
     async ({ url }) => {
@@ -77,7 +81,7 @@ export async function startMcpServer(defaultOutDir: string) {
     "create_clips",
     {
       description:
-        "Cut one or more clips from YouTube videos in parallel. Only the requested sections are downloaded. Jobs can span different videos. Returns a result per job; failures don't abort the batch.",
+        "Cut one or more clips from YouTube videos (including streams that are live right now) in parallel. Only the requested sections are downloaded. Jobs can span different videos. Returns a result per job; failures don't abort the batch. Live results include the wall-clock range covered.",
       inputSchema: {
         clips: z
           .array(
@@ -88,6 +92,7 @@ export async function startMcpServer(defaultOutDir: string) {
               label: z.string().optional().describe("Short name used for the output file"),
               vertical: z.boolean().optional().describe("Crop to 9:16 for Shorts/Reels/TikTok"),
               maxHeight: z.number().optional().describe("Max resolution height, default 1080"),
+              precise: z.boolean().optional().describe("Live only: frame-accurate cut (slower re-encode). Default snaps start to a keyframe ≤5s earlier."),
             }),
           )
           .min(1),

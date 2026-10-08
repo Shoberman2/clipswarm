@@ -21,6 +21,7 @@ clipswarm is the small piece in between, a **clipping primitive for your own age
 - **Agent-first tools**: `search_transcript` gives an agent timestamps, and `create_clips` turns those timestamps into files. Your agent decides what's worth clipping.
 - **Built for parallelism**: batch jobs across many videos, many simultaneous callers, and one shared limit on concurrent work so you don't fork-bomb yt-dlp.
 - **Section-only downloads**: a 30-second clip from a 3-hour stream downloads about 30 seconds of video, not 3 hours.
+- **Works on live streams**: clip what *just happened* on a stream that's live right now (`start: -90, end: "now"`), or what aired at a specific time.
 - **Failures are per job**: one bad timestamp doesn't sink a batch of 50, and intermittent YouTube 403s are retried with backoff.
 - **No API keys, no GPU, no LLM inside**: bring your own agent (Claude Code, Claude Desktop, Cursor, or anything that speaks MCP).
 
@@ -58,6 +59,29 @@ Other MCP clients (Claude Desktop, Cursor, …) use the same command: `npx -y cl
 { "mcpServers": { "clipswarm": { "command": "npx", "args": ["-y", "clipswarm", "mcp", "--out", "/Users/you/clips"] } } }
 ```
 
+## How it works
+
+1. **Find the moment.** The agent calls `get_video_info` and `search_transcript` / `get_transcript`. clipswarm reads YouTube's captions through yt-dlp and caches them, so ten agents reading the same video cost one fetch.
+2. **Cut it.** The agent sends timestamps to `create_clips`:
+   - **Regular videos:** yt-dlp downloads *only that section* and ffmpeg cuts it at the requested frames.
+   - **Live streams:** YouTube keeps a rolling ~1-hour buffer of every live stream as 5-second HLS segments, each stamped with its wall-clock time. clipswarm fetches just the segments covering your range and stitches them with ffmpeg.
+3. **Share the machine.** Every call, from every agent, goes through one shared concurrency limiter, so jobs queue instead of overloading your CPU or getting you rate-limited.
+
+## Live streams
+
+Paste the link to a stream that's live right now (a `watch?v=` link or a channel's `/live` link works). Times are relative to the live edge:
+
+| You want | `start` | `end` |
+|---|---|---|
+| The last 30 seconds | `-30` | `"now"` |
+| 2 minutes ago, 20s long | `"-2:00"` | `"-1:40"` |
+| What aired at a specific moment | `"2026-10-08T00:51:00Z"` | `"2026-10-08T00:51:30Z"` |
+
+- Only about the **last hour** is available. Older requests fail with a clear message.
+- Live clips are **stream-copied** (fast), so they start on the previous keyframe, up to about 5 seconds early. The result's `live.from` / `live.to` report the exact wall-clock range covered. Pass `precise: true` for frame-accurate cuts (slower re-encode). Vertical clips are always re-encoded.
+- You can't clip the future: an `end` that hasn't aired yet returns an error, so retry after it airs.
+- Transcripts aren't available while a stream is live, so clip by time. After the stream ends and YouTube processes it, it's a normal video again.
+
 ## MCP tools
 
 | Tool | What it does |
@@ -65,12 +89,13 @@ Other MCP clients (Claude Desktop, Cursor, …) use the same command: `npx -y cl
 | `get_video_info` | Title, channel, duration, chapters |
 | `get_transcript` | Timestamped transcript as compact `[m:ss] text` lines, optionally windowed with `from`/`to` |
 | `search_transcript` | Finds where a phrase is said and returns padded time windows ready to clip |
-| `create_clips` | Cuts many clips in parallel across any number of videos. Options: `label`, `vertical` (9:16), `maxHeight` |
+| `create_clips` | Cuts many clips in parallel across any number of videos (live or not). Options: `label`, `vertical` (9:16), `maxHeight`, `precise` (live only) |
 
 ## CLI
 
 ```bash
 clipswarm clip <url> 1:23 1:58 --label hook --vertical
+clipswarm clip <live-url> -60 now --label last-minute     # live stream: the last 60 seconds
 clipswarm batch examples/jobs.json --out clips     # writes clips/manifest.json
 clipswarm search <url> stay hungry
 clipswarm transcript <url>

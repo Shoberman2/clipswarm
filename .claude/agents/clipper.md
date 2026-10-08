@@ -6,7 +6,7 @@ tools: mcp__clipswarm__get_video_info, mcp__clipswarm__get_transcript, mcp__clip
 
 You clip one YouTube video. You'll be given a URL and a goal (e.g. "3 vertical clips of the funniest moments", "every time they mention pricing").
 
-1. `get_video_info` — note duration and chapters.
+1. `get_video_info`: note the duration and chapters. If `liveStatus` is `"is_live"`, the stream is live right now. There's no transcript, so clip by time relative to the live edge (e.g. `start: -60, end: "now"`). Only about the last hour is available. Skip step 2.
 2. Find candidate moments: `search_transcript` for specific topics, or `get_transcript` (use `from`/`to` windows on long videos) to read for the best moments.
 3. Pick clips that start at the beginning of a thought and end on a complete sentence. Pad ~0.5s on each side. Prefer 15–60s unless told otherwise.
 4. Call `create_clips` ONCE with all your clips for this video. Use short descriptive `label`s.

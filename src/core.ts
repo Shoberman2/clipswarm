@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdir, rm, stat, rename } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, stat, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 
@@ -13,6 +13,11 @@ export interface ClipJob {
   vertical?: boolean;
   /** Max video height to download. Default 1080. */
   maxHeight?: number;
+  /**
+   * Live streams only: re-encode for frame-accurate cuts. By default live clips
+   * are stream-copied (fast) and start on the previous keyframe, up to ~5s early.
+   */
+  precise?: boolean;
 }
 
 export interface ClipResult {
@@ -23,6 +28,8 @@ export interface ClipResult {
   bytes?: number;
   error?: string;
   elapsedMs: number;
+  /** Set for clips cut from a live stream: wall-clock time the clip covers. */
+  live?: { from?: string; to?: string };
 }
 
 export interface TranscriptSegment {
@@ -35,7 +42,10 @@ export interface VideoInfo {
   id: string;
   title: string;
   channel?: string;
-  durationSec: number;
+  /** null for live streams. */
+  durationSec: number | null;
+  /** "is_live" | "was_live" | "is_upcoming" | "not_live" | "post_live" */
+  liveStatus?: string;
   chapters: { title: string; start: number; end: number }[];
 }
 
@@ -43,11 +53,13 @@ const MAX_CLIP_SEC = Number(process.env.CLIPSWARM_MAX_CLIP_SEC ?? 600);
 
 // ---------- time helpers ----------
 
-/** Accepts 83, "83", "1:23", "01:01:23.5". Returns seconds. */
+/** Accepts 83, "83", "1:23", "01:01:23.5", and negatives like "-1:30". Returns seconds. */
 export function parseTime(t: string | number): number {
   if (typeof t === "number") return t;
-  const parts = t.trim().split(":").map(Number);
-  if (parts.some((p) => Number.isNaN(p))) throw new Error(`Invalid timestamp: "${t}"`);
+  t = t.trim();
+  if (t.startsWith("-")) return -parseTime(t.slice(1));
+  const parts = t.split(":").map(Number);
+  if (!t || parts.some((p) => Number.isNaN(p))) throw new Error(`Invalid timestamp: "${t}"`);
   return parts.reduce((acc, p) => acc * 60 + p, 0);
 }
 
@@ -130,24 +142,41 @@ interface RawInfo {
   title: string;
   channel?: string;
   uploader?: string;
-  duration: number;
+  duration: number | null;
+  is_live?: boolean;
+  live_status?: string;
+  formats?: RawFormat[];
   chapters?: { title: string; start_time: number; end_time: number }[] | null;
   subtitles?: Record<string, { ext: string; url: string }[]>;
   automatic_captions?: Record<string, { ext: string; url: string }[]>;
 }
 
-// Many agents often work on the same video; fetch its metadata once.
-const infoCache = new Map<string, Promise<RawInfo>>();
+interface RawFormat {
+  format_id: string;
+  url: string;
+  protocol?: string;
+  vcodec?: string;
+  acodec?: string;
+  height?: number | null;
+  tbr?: number | null;
+}
 
-function getRawInfo(url: string): Promise<RawInfo> {
-  let p = infoCache.get(url);
-  if (!p) {
-    p = limiter
-      .run(() => withRetry(() => exec("yt-dlp", ["-J", "--no-playlist", "--no-warnings", url])))
-      .then((s) => JSON.parse(s) as RawInfo);
-    p.catch(() => infoCache.delete(url));
-    infoCache.set(url, p);
+// Many agents often work on the same video; fetch its metadata once.
+// Live streams move (and their stream URLs expire), so those entries go stale fast.
+const infoCache = new Map<string, { at: number; p: Promise<RawInfo> }>();
+const LIVE_INFO_TTL_MS = 20_000;
+
+async function getRawInfo(url: string): Promise<RawInfo> {
+  const hit = infoCache.get(url);
+  if (hit) {
+    const info = await hit.p;
+    if (!info.is_live || Date.now() - hit.at < LIVE_INFO_TTL_MS) return info;
   }
+  const p = limiter
+    .run(() => withRetry(() => exec("yt-dlp", ["-J", "--no-playlist", "--no-warnings", url])))
+    .then((s) => JSON.parse(s) as RawInfo);
+  p.catch(() => infoCache.delete(url));
+  infoCache.set(url, { at: Date.now(), p });
   return p;
 }
 
@@ -157,7 +186,8 @@ export async function getVideoInfo(url: string): Promise<VideoInfo> {
     id: r.id,
     title: r.title,
     channel: r.channel ?? r.uploader,
-    durationSec: r.duration,
+    durationSec: r.is_live ? null : r.duration,
+    liveStatus: r.live_status,
     chapters: (r.chapters ?? []).map((c) => ({ title: c.title, start: c.start_time, end: c.end_time })),
   };
 }
@@ -187,7 +217,12 @@ async function fetchTranscript(url: string, lang: string): Promise<TranscriptSeg
     return key ? tracks[key].find((t) => t.ext === "json3") : undefined;
   };
   const track = pick(info.subtitles) ?? pick(info.automatic_captions);
-  if (!track) throw new Error(`No "${lang}" captions available for this video.`);
+  if (!track)
+    throw new Error(
+      info.is_live
+        ? "Transcripts aren't available while a stream is live. Clip by time instead (e.g. start: -120, end: \"now\")."
+        : `No "${lang}" captions available for this video.`,
+    );
 
   const res = await fetch(track.url);
   if (!res.ok) throw new Error(`Caption download failed: HTTP ${res.status}`);
@@ -236,23 +271,45 @@ function slug(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 80) || "clip";
 }
 
+function isAbsolute(t: string | number): boolean {
+  return typeof t === "string" && (/^now$/i.test(t.trim()) || /^\d{4}-\d{2}-\d{2}T/.test(t.trim()));
+}
+
+function checkLength(start: number, end: number, job: ClipJob) {
+  if (!(end > start)) throw new Error(`end (${job.end}) must be after start (${job.start})`);
+  if (end - start > MAX_CLIP_SEC)
+    throw new Error(`Clip is ${Math.round(end - start)}s; max is ${MAX_CLIP_SEC}s (set CLIPSWARM_MAX_CLIP_SEC to raise).`);
+}
+
 /**
- * Downloads only the requested section (yt-dlp --download-sections), so a
- * 30-second clip from a 3-hour stream doesn't pull the whole video.
+ * Cuts one clip. VODs download only the requested section (yt-dlp
+ * --download-sections), so a 30-second clip from a 3-hour stream doesn't
+ * pull the whole video. Live streams are cut from YouTube's DVR window.
  */
 export async function createClip(job: ClipJob, outDir: string): Promise<ClipResult> {
   const t0 = Date.now();
   try {
-    const start = parseTime(job.start);
-    const end = parseTime(job.end);
-    if (!(end > start)) throw new Error(`end (${job.end}) must be after start (${job.start})`);
-    if (end - start > MAX_CLIP_SEC)
-      throw new Error(`Clip is ${end - start}s; max is ${MAX_CLIP_SEC}s (set CLIPSWARM_MAX_CLIP_SEC to raise).`);
+    // Catch obviously bad ranges before touching the network.
+    if (!isAbsolute(job.start) && !isAbsolute(job.end)) {
+      const a = parseTime(job.start);
+      const b = parseTime(job.end);
+      if (Math.sign(a) === Math.sign(b) || b === 0) checkLength(a, b, job);
+    }
 
     await mkdir(outDir, { recursive: true });
     const info = await getRawInfo(job.url);
-    const name = slug(job.label ?? `${info.id}_${formatTime(start)}-${formatTime(end)}`);
-    const finalPath = path.resolve(outDir, `${name}${job.vertical ? "_vertical" : ""}.mp4`);
+    if (info.live_status === "is_upcoming") throw new Error("This stream hasn't started yet.");
+    if (info.is_live) return await createLiveClip(job, info, outDir, t0);
+
+    if (isAbsolute(job.start) || isAbsolute(job.end))
+      throw new Error('"now" and ISO timestamps only apply to live streams; use offsets like "1:23".');
+    // Negative times count back from the end of the video.
+    const rel = (t: number) => (t < 0 ? (info.duration ?? 0) + t : t);
+    const start = rel(parseTime(job.start));
+    const end = rel(parseTime(job.end));
+    checkLength(start, end, job);
+
+    const finalPath = outputPath(job, info, outDir, `${formatTime(start)}-${formatTime(end)}`);
     const h = job.maxHeight ?? 1080;
 
     await limiter.run(async () => {
@@ -276,7 +333,7 @@ export async function createClip(job: ClipJob, outDir: string): Promise<ClipResu
       if (job.vertical) {
         await exec("ffmpeg", [
           "-y", "-loglevel", "error", "-i", raw,
-          "-vf", "crop='min(iw,ih*9/16)':ih,scale=1080:1920",
+          "-vf", VERTICAL_FILTER,
           "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-c:a", "copy",
           finalPath + ".tmp.mp4",
         ]);
@@ -290,6 +347,173 @@ export async function createClip(job: ClipJob, outDir: string): Promise<ClipResu
   } catch (e) {
     return { ok: false, job, error: (e as Error).message, elapsedMs: Date.now() - t0 };
   }
+}
+
+const VERTICAL_FILTER = "crop='min(iw,ih*9/16)':ih,scale=1080:1920";
+
+function outputPath(job: ClipJob, info: RawInfo, outDir: string, range: string): string {
+  const name = slug(job.label ?? `${info.id}_${range}`);
+  return path.resolve(outDir, `${name}${job.vertical ? "_vertical" : ""}.mp4`);
+}
+
+// ---------- live streams ----------
+
+interface HlsSegment {
+  seq: number;
+  /** Seconds from the start of the playlist window. */
+  start: number;
+  dur: number;
+  url: string;
+  /** Wall-clock start, epoch ms (from EXT-X-PROGRAM-DATE-TIME). */
+  pdt?: number;
+}
+
+export function parsePlaylist(text: string): HlsSegment[] {
+  const segs: HlsSegment[] = [];
+  let seq = 0;
+  let t = 0;
+  let dur = 0;
+  let pdt: number | undefined;
+  for (const raw of text.split("\n")) {
+    const l = raw.trim();
+    if (l.startsWith("#EXT-X-MEDIA-SEQUENCE:")) seq = Number(l.slice(22));
+    else if (l.startsWith("#EXT-X-PROGRAM-DATE-TIME:")) pdt = Date.parse(l.slice(25));
+    else if (l.startsWith("#EXTINF:")) dur = parseFloat(l.slice(8));
+    else if (l && !l.startsWith("#")) {
+      segs.push({ seq, start: t, dur, url: l, pdt });
+      seq++;
+      t += dur;
+      if (pdt !== undefined) pdt += dur * 1000;
+    }
+  }
+  return segs;
+}
+
+async function fetchPlaylist(url: string): Promise<HlsSegment[]> {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Live playlist request failed: HTTP ${res.status}`);
+  const segs = parsePlaylist(await res.text());
+  if (!segs.length) throw new Error("Live playlist is empty.");
+  return segs;
+}
+
+/**
+ * Resolves a live-stream time to seconds within the DVR window.
+ * Accepts "now", negative offsets from the live edge (-90, "-1:30"), or ISO timestamps.
+ */
+export function resolveLiveTime(t: string | number, segs: HlsSegment[]): number {
+  const last = segs[segs.length - 1];
+  const edge = last.start + last.dur;
+  if (typeof t === "string" && /^now$/i.test(t.trim())) return edge;
+  if (typeof t === "string" && /^\d{4}-\d{2}-\d{2}T/.test(t.trim())) {
+    const ms = Date.parse(t);
+    if (Number.isNaN(ms)) throw new Error(`Invalid timestamp: "${t}"`);
+    if (segs[0].pdt === undefined) throw new Error("This stream doesn't expose wall-clock times; use offsets like -90.");
+    return (ms - segs[0].pdt) / 1000;
+  }
+  const v = parseTime(t);
+  if (v > 0)
+    throw new Error(
+      `For live streams, use "now", negative offsets from the live edge (e.g. start: -90, end: -30), or ISO timestamps. Got "${t}".`,
+    );
+  return edge + v;
+}
+
+function pickLiveFormats(info: RawInfo, maxHeight: number) {
+  const hls = (info.formats ?? []).filter((f) => f.protocol?.startsWith("m3u8") && f.url);
+  const video = hls
+    .filter((f) => f.vcodec && f.vcodec !== "none" && (f.height ?? 0) <= maxHeight)
+    .sort((a, b) => (b.height ?? 0) - (a.height ?? 0) || (b.tbr ?? 0) - (a.tbr ?? 0))[0];
+  if (!video) throw new Error("No HLS stream found for this live video.");
+  // YouTube's live HLS video renditions are usually video-only; pair with the best audio rendition.
+  const audio =
+    video.acodec && video.acodec !== "none"
+      ? undefined
+      : hls
+          // yt-dlp often reports live audio renditions' acodec as unknown (null).
+          .filter((f) => f.vcodec === "none" && f.acodec !== "none")
+          .sort((a, b) => (b.tbr ?? 0) - (a.tbr ?? 0) || Number(b.format_id) - Number(a.format_id))[0];
+  return { video, audio };
+}
+
+async function downloadSegments(segs: HlsSegment[], file: string): Promise<void> {
+  const bufs: Buffer[] = new Array(segs.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < segs.length) {
+      const i = next++;
+      bufs[i] = await withRetry(async () => {
+        const r = await fetch(segs[i].url);
+        if (!r.ok) throw new Error(`Segment ${segs[i].seq} failed: HTTP ${r.status}`);
+        return Buffer.from(await r.arrayBuffer());
+      });
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(8, segs.length) }, worker));
+  await writeFile(file, Buffer.concat(bufs));
+}
+
+async function createLiveClip(job: ClipJob, info: RawInfo, outDir: string, t0: number): Promise<ClipResult> {
+  const { video, audio } = pickLiveFormats(info, job.maxHeight ?? 1080);
+  const [vSegs, aSegs] = await Promise.all([fetchPlaylist(video.url), audio ? fetchPlaylist(audio.url) : undefined]);
+
+  const window = vSegs[vSegs.length - 1].start + vSegs[vSegs.length - 1].dur;
+  const start = resolveLiveTime(job.start, vSegs);
+  const end = resolveLiveTime(job.end, vSegs);
+  checkLength(start, end, job);
+  if (start < 0)
+    throw new Error(`That's further back than YouTube keeps for this stream (about the last ${Math.floor(window / 60)} min).`);
+  if (end > window + 1) throw new Error("end is in the future. Wait until it has aired, then retry.");
+
+  const vSel = vSegs.filter((s) => s.start + s.dur > start && s.start < end);
+  const seqs = new Set(vSel.map((s) => s.seq));
+  const aSel = aSegs?.filter((s) => seqs.has(s.seq));
+  // Re-encoding 720p60+ is slow, so by default copy streams and start on the
+  // segment's keyframe. YouTube live segments each begin with one.
+  const reencode = !!(job.vertical || job.precise);
+  const from = reencode ? start : vSel[0].start;
+  const offset = from - vSel[0].start;
+  const wall = (sec: number) =>
+    vSegs[0].pdt !== undefined ? new Date(vSegs[0].pdt + sec * 1000).toISOString() : undefined;
+
+  const stamp = (wall(from) ?? `${Date.now()}`).replace(/[:.]/g, "-").slice(0, 19);
+  const finalPath = outputPath(job, info, outDir, `live-${stamp}`);
+
+  await limiter.run(async () => {
+    const tmp = await mkdtemp(path.join(os.tmpdir(), "clipswarm-"));
+    try {
+      const vFile = path.join(tmp, "v.ts");
+      const aFile = path.join(tmp, "a.ts");
+      await Promise.all([downloadSegments(vSel, vFile), aSel?.length ? downloadSegments(aSel, aFile) : undefined]);
+      const hasAudio = !!aSel?.length;
+      const aOffset = hasAudio ? from - vSel.find((s) => s.seq === aSel![0].seq)!.start : 0;
+      await exec("ffmpeg", [
+        "-y", "-loglevel", "error",
+        ...(offset > 0 ? ["-ss", String(offset)] : []), "-i", vFile,
+        ...(hasAudio ? [...(aOffset > 0 ? ["-ss", String(aOffset)] : []), "-i", aFile] : []),
+        "-t", String(end - from),
+        "-map", "0:v:0", ...(hasAudio ? ["-map", "1:a:0"] : ["-map", "0:a?"]),
+        ...(job.vertical ? ["-vf", VERTICAL_FILTER] : []),
+        ...(reencode ? ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20"] : ["-c:v", "copy"]),
+        "-c:a", "aac", "-b:a", "160k",
+        "-movflags", "+faststart",
+        finalPath,
+      ]);
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  const { size } = await stat(finalPath);
+  return {
+    ok: true,
+    job,
+    path: finalPath,
+    durationSec: end - from,
+    bytes: size,
+    elapsedMs: Date.now() - t0,
+    live: { from: wall(from), to: wall(end) },
+  };
 }
 
 /** Runs all jobs concurrently (bounded by the shared limiter). Never throws; check `ok` per result. */

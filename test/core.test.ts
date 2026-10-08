@@ -25,3 +25,39 @@ test("createClip rejects bad ranges without touching the network", async () => {
   const long = await createClip({ url: "https://youtu.be/x", start: 0, end: 99999 }, "/tmp");
   assert.match(long.error!, /max is/);
 });
+
+import { parsePlaylist, resolveLiveTime } from "../src/core.js";
+
+const PLAYLIST = `#EXTM3U
+#EXT-X-TARGETDURATION:5
+#EXT-X-MEDIA-SEQUENCE:100
+#EXT-X-PROGRAM-DATE-TIME:2026-10-08T00:00:00.000+00:00
+#EXTINF:5.0,
+https://example.com/seg100.ts
+#EXTINF:5.0,
+https://example.com/seg101.ts
+#EXTINF:5.0,
+https://example.com/seg102.ts
+`;
+
+test("parsePlaylist tracks sequence numbers, offsets and wall clock", () => {
+  const segs = parsePlaylist(PLAYLIST);
+  assert.equal(segs.length, 3);
+  assert.deepEqual(segs.map((s) => s.seq), [100, 101, 102]);
+  assert.deepEqual(segs.map((s) => s.start), [0, 5, 10]);
+  assert.equal(new Date(segs[2].pdt!).toISOString(), "2026-10-08T00:00:10.000Z");
+});
+
+test("negative times parse as offsets", () => {
+  assert.equal(parseTime("-1:30"), -90);
+  assert.equal(parseTime(-5), -5);
+});
+
+test("resolveLiveTime handles now, negative offsets and ISO times", () => {
+  const segs = parsePlaylist(PLAYLIST);
+  assert.equal(resolveLiveTime("now", segs), 15);
+  assert.equal(resolveLiveTime(-10, segs), 5);
+  assert.equal(resolveLiveTime("-0:05", segs), 10);
+  assert.equal(resolveLiveTime("2026-10-08T00:00:07Z", segs), 7);
+  assert.throws(() => resolveLiveTime(30, segs), /negative offsets/);
+});
