@@ -61,3 +61,56 @@ test("resolveLiveTime handles now, negative offsets and ISO times", () => {
   assert.equal(resolveLiveTime("2026-10-08T00:00:07Z", segs), 7);
   assert.throws(() => resolveLiveTime(30, segs), /negative offsets/);
 });
+
+import { buildCaptionFrames, fitText, renderCaption, renderHeader } from "../src/viral.js";
+import opentype from "opentype.js";
+import { readFileSync } from "node:fs";
+
+test("glyph paths never contain NaN (opentype.js 2.0 regression)", () => {
+  const b = readFileSync(new URL("../assets/fonts/Montserrat-Black.ttf", import.meta.url));
+  const f = opentype.parse(b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength));
+  const t = "Steve Jobs' best advice QWERTYUIOPASDFGHJKLZXCVBNM?!.,0123456789";
+  for (let x = 0; x < 1000; x += 13.7) for (const size of [44, 64, 84]) assert.ok(!f.getPath(t, x, 120, size).toPathData(2).includes("NaN"));
+});
+
+test("header and caption render to PNG", () => {
+  const h = renderHeader("Steve Jobs' best advice in 30 seconds");
+  assert.equal(h.png.subarray(1, 4).toString(), "PNG");
+  assert.ok(h.height > 100 && h.height < 500);
+  assert.equal(renderCaption(["STAY", "HUNGRY"], 1, "#FFE600").subarray(1, 4).toString(), "PNG");
+});
+
+test("fitText shrinks long text and truncates past maxLines", () => {
+  const short = fitText("Short hook", 900, 3, 72, 44);
+  assert.equal(short.size, 72);
+  const long = fitText("word ".repeat(80).trim(), 900, 3, 72, 44);
+  assert.equal(long.lines.length, 3);
+  assert.ok(long.lines[2].endsWith("…"));
+});
+
+test("caption frames: chunks of <=3 words, one frame per word, in order", () => {
+  const words = "so stay hungry. stay foolish and thank you".split(" ").map((text, i) => ({ start: i * 0.4, end: i * 0.4 + 0.35, text }));
+  const frames = buildCaptionFrames(words, 10);
+  assert.equal(frames.length, words.length);
+  assert.ok(frames.every((f) => f.words.length <= 3 && f.end > f.start));
+  assert.deepEqual(frames[2].words, ["SO", "STAY", "HUNGRY."]); // breaks after punctuation
+  for (let i = 1; i < frames.length; i++) assert.ok(frames[i].start >= frames[i - 1].start);
+});
+
+import { limiter } from "../src/core.js";
+
+test("limiter never runs more than its max at once", async () => {
+  let active = 0;
+  let peak = 0;
+  const max = Number(process.env.CLIPSWARM_CONCURRENCY ?? 0) || (limiter as unknown as { max: number }).max;
+  await Promise.all(
+    Array.from({ length: 40 }, () =>
+      limiter.run(async () => {
+        peak = Math.max(peak, ++active);
+        await new Promise((r) => setTimeout(r, Math.random() * 5));
+        active--;
+      }),
+    ),
+  );
+  assert.ok(peak <= max, `peak ${peak} > max ${max}`);
+});

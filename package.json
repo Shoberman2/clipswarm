@@ -1,7 +1,7 @@
 {
   "name": "clipswarm",
   "version": "0.1.0",
-  "description": "Parallel YouTube clipping for AI agents — MCP server + CLI built on yt-dlp and ffmpeg",
+  "description": "Parallel YouTube & livestream clipping for AI agents: viral 9:16 shorts with hook headers and word-by-word captions. MCP server + CLI.",
   "main": "dist/core.js",
   "scripts": {
     "build": "tsc",
@@ -16,15 +16,25 @@
     "yt-dlp",
     "ffmpeg",
     "agents",
-    "claude"
+    "claude",
+    "shorts",
+    "tiktok",
+    "reels",
+    "viral",
+    "captions",
+    "livestream",
+    "opusclip-alternative"
   ],
   "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.1",
+    "@resvg/resvg-js": "^2.6.2",
+    "opentype.js": "1.3.4",
     "zod": "^4.6.5"
   },
   "devDependencies": {
     "@types/node": "^26.6.4",
+    "@types/opentype.js": "^1.3.10",
     "tsx": "^4.23.15",
     "typescript": "^5.9.3"
   },
@@ -35,6 +45,7 @@
   "types": "dist/core.d.ts",
   "files": [
     "dist",
+    "assets",
     "!dist/**/*.test.*"
   ],
   "engines": {
@@ -47,5 +58,6 @@
   "homepage": "https://github.com/Shoberman2/clipswarm#readme",
   "bugs": {
     "url": "https://github.com/Shoberman2/clipswarm/issues"
-  }
+  },
+  "mcpName": "io.github.Shoberman2/clipswarm"
 }

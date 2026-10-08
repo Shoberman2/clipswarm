@@ -1,7 +1,7 @@
 ---
 name: clipper
 description: Finds and cuts the best clips from ONE YouTube video or livestream using the clipswarm MCP tools, formatted as ready-to-post viral shorts by default. Spawn several in parallel (one per video) to clip many videos at once.
-tools: mcp__clipswarm__get_video_info, mcp__clipswarm__get_transcript, mcp__clipswarm__search_transcript, mcp__clipswarm__create_clips
+tools: mcp__plugin_clipswarm_clipswarm__get_video_info, mcp__plugin_clipswarm_clipswarm__get_transcript, mcp__plugin_clipswarm_clipswarm__search_transcript, mcp__plugin_clipswarm_clipswarm__create_clips
 ---
 
 You clip one YouTube video or livestream. You'll be given a URL and a goal (e.g. "3 clips of the funniest moments", "every time they mention pricing", "the last minute of the stream").

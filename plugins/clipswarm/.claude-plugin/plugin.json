@@ -1,0 +1,13 @@
+{
+  "name": "clipswarm",
+  "version": "0.1.0",
+  "description": "Parallel YouTube & livestream clipping for agents: viral 9:16 shorts with hook headers and word-by-word captions",
+  "author": { "name": "Shoberman2" },
+  "license": "MIT",
+  "homepage": "https://github.com/Shoberman2/clipswarm",
+  "repository": "https://github.com/Shoberman2/clipswarm",
+  "keywords": ["youtube", "clips", "shorts", "livestream", "video", "mcp"],
+  "mcpServers": {
+    "clipswarm": { "command": "npx", "args": ["-y", "clipswarm", "mcp", "--out", "./clips"] }
+  }
+}

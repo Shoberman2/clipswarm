@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { mkdir, mkdtemp, rm, stat, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
+import { renderViral, transcribeLocal, WHISPER_MODEL } from "./viral.js";
 
 export interface ClipJob {
   url: string;
@@ -18,6 +19,19 @@ export interface ClipJob {
    * are stream-copied (fast) and start on the previous keyframe, up to ~5s early.
    */
   precise?: boolean;
+  /**
+   * "viral": 1080x1920 with a hook header, the video on a blurred backdrop and
+   * word-by-word captions. "plain" (default): the clip as-is.
+   */
+  style?: "plain" | "viral";
+  /** Viral only: header hook text. Defaults to the video title; "" for none. */
+  title?: string;
+  /** Viral only: animated captions. Default true. */
+  captions?: boolean;
+  /** Viral only: "fit" (default) keeps the whole frame on a blurred backdrop; "fill" crops to 9:16. */
+  layout?: "fit" | "fill";
+  /** Viral only: highlight colour for the spoken word. Default "#FFE600". */
+  accent?: string;
 }
 
 export interface ClipResult {
@@ -30,9 +44,24 @@ export interface ClipResult {
   elapsedMs: number;
   /** Set for clips cut from a live stream: wall-clock time the clip covers. */
   live?: { from?: string; to?: string };
+  /** Where the clip starts in the source video, in seconds (VODs). */
+  sourceStart?: number;
+  /** Live stream-copy clips: seconds of extra footage before the requested start (keyframe snap). */
+  leadIn?: number;
+  videoTitle?: string;
+  /** Non-fatal issues, e.g. captions skipped. */
+  warnings?: string[];
 }
 
 export interface TranscriptSegment {
+  start: number;
+  end: number;
+  text: string;
+  /** Word-level timings: exact for YouTube auto-captions, interpolated for manual ones. */
+  words?: Word[];
+}
+
+export interface Word {
   start: number;
   end: number;
   text: string;
@@ -83,13 +112,15 @@ class Semaphore {
   private active = 0;
   constructor(private readonly max: number) {}
   async run<T>(fn: () => Promise<T>): Promise<T> {
-    if (this.active >= this.max) await new Promise<void>((r) => this.queue.push(r));
-    this.active++;
+    if (this.active < this.max) this.active++;
+    // A releasing job hands its slot straight to us, so `active` never overshoots.
+    else await new Promise<void>((r) => this.queue.push(r));
     try {
       return await fn();
     } finally {
-      this.active--;
-      this.queue.shift()?.();
+      const next = this.queue.shift();
+      if (next) next();
+      else this.active--;
     }
   }
 }
@@ -100,7 +131,7 @@ export const limiter = new Semaphore(
 
 // ---------- process helpers ----------
 
-function exec(cmd: string, args: string[]): Promise<string> {
+export function exec(cmd: string, args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
     const p = spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"] });
     let out = "";
@@ -133,6 +164,20 @@ async function withRetry<T>(fn: () => Promise<T>): Promise<T> {
       await new Promise((r) => setTimeout(r, 1000 * 2 ** attempt + Math.random() * 500));
     }
   }
+}
+
+let jsRuntimeArgs: Promise<string[]> | undefined;
+
+/**
+ * yt-dlp needs a JavaScript runtime to download from YouTube and only enables
+ * Deno by default. Node is always present when clipswarm runs, so offer it.
+ */
+function ytdlp(args: string[]): Promise<string> {
+  jsRuntimeArgs ??= exec("yt-dlp", ["--help"]).then(
+    (help) => (help.includes("--js-runtimes") ? ["--js-runtimes", `node:${process.execPath}`] : []),
+    () => [],
+  );
+  return jsRuntimeArgs.then((extra) => exec("yt-dlp", [...extra, ...args]));
 }
 
 // ---------- video info + transcript ----------
@@ -173,7 +218,7 @@ async function getRawInfo(url: string): Promise<RawInfo> {
     if (!info.is_live || Date.now() - hit.at < LIVE_INFO_TTL_MS) return info;
   }
   const p = limiter
-    .run(() => withRetry(() => exec("yt-dlp", ["-J", "--no-playlist", "--no-warnings", url])))
+    .run(() => withRetry(() => ytdlp(["-J", "--no-playlist", "--no-warnings", url])))
     .then((s) => JSON.parse(s) as RawInfo);
   p.catch(() => infoCache.delete(url));
   infoCache.set(url, { at: Date.now(), p });
@@ -194,19 +239,34 @@ export async function getVideoInfo(url: string): Promise<VideoInfo> {
 
 const transcriptCache = new Map<string, Promise<TranscriptSegment[]>>();
 
-/** Timestamped transcript from YouTube captions (manual preferred, auto as fallback). */
-export function getTranscript(url: string, lang = "en"): Promise<TranscriptSegment[]> {
-  const key = `${url}::${lang}`;
+/**
+ * Timestamped transcript from YouTube captions. `prefer: "manual"` (default)
+ * favours human captions for accurate text; `"auto"` favours auto-captions,
+ * which carry exact per-word timing (what animated captions need).
+ */
+export function getTranscript(url: string, lang = "en", prefer: "manual" | "auto" = "manual"): Promise<TranscriptSegment[]> {
+  const key = `${url}::${lang}::${prefer}`;
   let p = transcriptCache.get(key);
   if (!p) {
-    p = fetchTranscript(url, lang);
+    p = fetchTranscript(url, lang, prefer);
     p.catch(() => transcriptCache.delete(key));
     transcriptCache.set(key, p);
   }
   return p;
 }
 
-async function fetchTranscript(url: string, lang: string): Promise<TranscriptSegment[]> {
+/** Words spoken between `from` and `to` (seconds), re-based so `from` is 0. */
+export async function getWords(url: string, from: number, to: number, lang = "en"): Promise<Word[]> {
+  const segs = await getTranscript(url, lang, "auto");
+  const words: Word[] = [];
+  for (const seg of segs)
+    for (const w of seg.words ?? [])
+      if (w.end > from && w.start < to)
+        words.push({ start: Math.max(0, w.start - from), end: Math.min(to, w.end) - from, text: w.text });
+  return words;
+}
+
+async function fetchTranscript(url: string, lang: string, prefer: "manual" | "auto"): Promise<TranscriptSegment[]> {
   const info = await getRawInfo(url);
   const pick = (tracks?: Record<string, { ext: string; url: string }[]>) => {
     if (!tracks) return undefined;
@@ -216,7 +276,10 @@ async function fetchTranscript(url: string, lang: string): Promise<TranscriptSeg
       Object.keys(tracks).find((k) => k.startsWith(lang));
     return key ? tracks[key].find((t) => t.ext === "json3") : undefined;
   };
-  const track = pick(info.subtitles) ?? pick(info.automatic_captions);
+  const track =
+    prefer === "manual"
+      ? pick(info.subtitles) ?? pick(info.automatic_captions)
+      : pick(info.automatic_captions) ?? pick(info.subtitles);
   if (!track)
     throw new Error(
       info.is_live
@@ -227,17 +290,46 @@ async function fetchTranscript(url: string, lang: string): Promise<TranscriptSeg
   const res = await fetch(track.url);
   if (!res.ok) throw new Error(`Caption download failed: HTTP ${res.status}`);
   const data = (await res.json()) as {
-    events?: { tStartMs?: number; dDurationMs?: number; segs?: { utf8: string }[] }[];
+    events?: { tStartMs?: number; dDurationMs?: number; segs?: { utf8: string; tOffsetMs?: number }[] }[];
   };
+  return parseJson3(data.events ?? []);
+}
 
+export function parseJson3(
+  events: { tStartMs?: number; dDurationMs?: number; segs?: { utf8: string; tOffsetMs?: number }[] }[],
+): TranscriptSegment[] {
   const segments: TranscriptSegment[] = [];
-  for (const e of data.events ?? []) {
+  for (const e of events) {
     if (!e.segs || e.tStartMs === undefined) continue;
     const text = e.segs.map((s) => s.utf8).join("").replace(/\s+/g, " ").trim();
     if (!text) continue;
     const start = e.tStartMs / 1000;
-    segments.push({ start, end: start + (e.dDurationMs ?? 0) / 1000, text });
+    const end = start + (e.dDurationMs ?? 0) / 1000;
+
+    let words: Word[];
+    if (e.segs.length > 1 || e.segs[0].tOffsetMs !== undefined) {
+      // Auto-captions: one seg per word, each with its own offset.
+      words = e.segs
+        .map((s) => ({ start: start + (s.tOffsetMs ?? 0) / 1000, text: s.utf8.trim() }))
+        .filter((w) => w.text)
+        .map((w, i, arr) => ({ ...w, end: arr[i + 1]?.start ?? end }));
+    } else {
+      // Manual captions: spread the line's words across its duration, weighted by length.
+      const parts = text.split(" ");
+      const total = parts.reduce((n, w) => n + w.length + 1, 0);
+      let t = start;
+      words = parts.map((w) => {
+        const d = ((w.length + 1) / total) * (end - start);
+        const word = { start: t, end: t + d, text: w };
+        t += d;
+        return word;
+      });
+    }
+    segments.push({ start, end, text, words });
   }
+  // Auto-caption events overlap (each line stays up until the next one ends); clamp word ends.
+  const all = segments.flatMap((s) => s.words ?? []);
+  for (let i = 0; i < all.length - 1; i++) all[i].end = Math.min(all[i].end, all[i + 1].start);
   return segments;
 }
 
@@ -287,6 +379,7 @@ function checkLength(start: number, end: number, job: ClipJob) {
  * pull the whole video. Live streams are cut from YouTube's DVR window.
  */
 export async function createClip(job: ClipJob, outDir: string): Promise<ClipResult> {
+  if (job.style === "viral") return createViralClip(job, outDir);
   const t0 = Date.now();
   try {
     // Catch obviously bad ranges before touching the network.
@@ -314,7 +407,7 @@ export async function createClip(job: ClipJob, outDir: string): Promise<ClipResu
 
     await limiter.run(async () => {
       const raw = job.vertical ? finalPath.replace(/\.mp4$/, ".src.mp4") : finalPath;
-      await withRetry(() => exec("yt-dlp", [
+      await withRetry(() => ytdlp([
         "--no-playlist",
         "--no-warnings",
         "--quiet",
@@ -343,7 +436,16 @@ export async function createClip(job: ClipJob, outDir: string): Promise<ClipResu
     });
 
     const { size } = await stat(finalPath);
-    return { ok: true, job, path: finalPath, durationSec: end - start, bytes: size, elapsedMs: Date.now() - t0 };
+    return {
+      ok: true,
+      job,
+      path: finalPath,
+      durationSec: end - start,
+      bytes: size,
+      elapsedMs: Date.now() - t0,
+      sourceStart: start,
+      videoTitle: info.title,
+    };
   } catch (e) {
     return { ok: false, job, error: (e as Error).message, elapsedMs: Date.now() - t0 };
   }
@@ -513,7 +615,79 @@ async function createLiveClip(job: ClipJob, info: RawInfo, outDir: string, t0: n
     bytes: size,
     elapsedMs: Date.now() - t0,
     live: { from: wall(from), to: wall(end) },
+    leadIn: start - from,
+    videoTitle: info.title,
   };
+}
+
+/**
+ * Cuts a plain clip into a temp dir, gets word timings (YouTube captions for
+ * VODs, local whisper.cpp for live streams or videos without captions), then
+ * renders the 9:16 viral version.
+ */
+async function createViralClip(job: ClipJob, outDir: string): Promise<ClipResult> {
+  const t0 = Date.now();
+  let tmp: string | undefined;
+  try {
+    tmp = await mkdtemp(path.join(os.tmpdir(), "clipswarm-src-"));
+    const base = await createClip({ ...job, style: "plain", vertical: false, label: "src" }, tmp);
+    if (!base.ok) return { ...base, job, elapsedMs: Date.now() - t0 };
+
+    const warnings: string[] = [];
+    const lead = base.leadIn ?? 0;
+    let words: Word[] | undefined;
+    if (job.captions !== false) {
+      if (base.sourceStart !== undefined)
+        words = await getWords(job.url, base.sourceStart, base.sourceStart + base.durationSec!).catch(() => undefined);
+      if (!words?.length) words = await limiter.run(() => transcribeLocal(base.path!)).then(
+        // Re-base whisper's timings past any keyframe lead-in that renderViral trims off.
+        (w) => w?.map((x) => ({ ...x, start: x.start - lead, end: x.end - lead })).filter((x) => x.end > 0),
+      ).catch((e) => {
+        warnings.push(`Local transcription failed: ${(e as Error).message}`);
+        return undefined;
+      });
+      const transcribed = words !== undefined;
+      if (!words?.length && transcribed && !warnings.length) warnings.push("No speech detected in this clip; rendered without captions.");
+      else if (!words?.length && !warnings.length)
+        warnings.push(
+          `No captions: ${base.live ? "live streams have no YouTube captions" : "this video has no captions"}. ` +
+            `Install whisper.cpp and run \`clipswarm setup\` to transcribe locally (model: ${WHISPER_MODEL}).`,
+        );
+    }
+
+    const at = base.sourceStart !== undefined ? formatTime(base.sourceStart) : base.live?.from ?? String(Date.now());
+    const name = slug(job.label ?? `${(base.videoTitle ?? "clip").slice(0, 40)}-${at}`);
+    const dest = path.resolve(outDir, `${name}_viral.mp4`);
+    await mkdir(outDir, { recursive: true });
+    await limiter.run(() =>
+      renderViral(base.path!, dest, words, {
+        title: job.title ?? base.videoTitle,
+        captions: job.captions,
+        layout: job.layout,
+        accent: job.accent,
+        trimStart: lead,
+      }),
+    );
+    const { size } = await stat(dest);
+    const live = base.live?.from
+      ? { ...base.live, from: new Date(Date.parse(base.live.from) + lead * 1000).toISOString() }
+      : base.live;
+    return {
+      ...base,
+      job,
+      path: dest,
+      live,
+      leadIn: undefined,
+      durationSec: base.durationSec! - lead,
+      bytes: size,
+      elapsedMs: Date.now() - t0,
+      ...(warnings.length ? { warnings } : {}),
+    };
+  } catch (e) {
+    return { ok: false, job, error: (e as Error).message, elapsedMs: Date.now() - t0 };
+  } finally {
+    if (tmp) await rm(tmp, { recursive: true, force: true });
+  }
 }
 
 /** Runs all jobs concurrently (bounded by the shared limiter). Never throws; check `ok` per result. */
