@@ -112,6 +112,7 @@ Contributors: see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for a full walkth
 | `get_transcript` | Timestamped transcript as compact `[m:ss] text` lines, optionally windowed with `from`/`to` |
 | `search_transcript` | Where a phrase is said, as padded time windows ready to clip |
 | `create_clips` | Cuts many clips in parallel across any number of videos, live or not. Options: `style`, `title`, `layout`, `captions`, `accent`, `label`, `vertical`, `maxHeight`, `precise` |
+| `get_clips` | Collects results from a batch still rendering. `create_clips` returns after ~40s with a `jobId` so MCP clients' ~60s timeouts never kill long batches |
 
 ## CLI
 
