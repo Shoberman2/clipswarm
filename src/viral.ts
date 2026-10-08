@@ -13,7 +13,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import opentype from "opentype.js";
 import { Resvg } from "@resvg/resvg-js";
-import { exec, type Word } from "./core.js";
+import { exec, withRetry, ytdlp, type Word } from "./core.js";
 
 export interface ViralOptions {
   /** Header hook text. Omit or "" for no header. */
@@ -229,6 +229,25 @@ export async function transcribeLocal(videoPath: string): Promise<Word[] | undef
       .map((t) => ({ start: t.offsets.from / 1000, end: t.offsets.to / 1000, text: t.text.trim() }))
       // Drop non-speech markers: [BLANK_AUDIO], (music), ♪♪
       .filter((w) => w.text && !/^\[.*\]$|^\(.*\)$|^[♪♫\s]+$/.test(w.text));
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Transcribes a YouTube video by downloading only its audio and running
+ * whisper.cpp. A fallback for when YouTube captions are missing or
+ * rate-limited (HTTP 429). Undefined if whisper isn't set up.
+ */
+export async function transcribeUrl(url: string): Promise<Word[] | undefined> {
+  if (!(await findWhisper()) || !existsSync(WHISPER_MODEL)) return undefined;
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "clipswarm-audio-"));
+  try {
+    const out = path.join(tmp, "audio.m4a");
+    await withRetry(() =>
+      ytdlp(["--no-playlist", "--no-warnings", "--quiet", "--force-overwrites", "-f", "ba[ext=m4a]/ba", "-x", "--audio-format", "m4a", "-o", out, url]),
+    );
+    return await transcribeLocal(out);
   } finally {
     await rm(tmp, { recursive: true, force: true });
   }

@@ -193,3 +193,21 @@ When `info.is_live` is set, `createClip` hands off to `createLiveClip` (`src/cor
 - **New MCP tools.** Register them in `startMcpServer`. Return compact text, and route errors through `fail`.
 - **New sources** (local files, other sites). Branch early in `createClip` next to the `is_live` check. Keep the "return `{ ok: false }`, never throw" contract.
 - **Anything slow or external.** Run it through `limiter.run`, and wrap flaky network calls in `withRetry`.
+
+## Watches (`src/watch.ts`, `src/pick.ts`)
+
+Scheduled discovery. A watch is a YouTube search plus filters, stored in `~/.clipswarm/state.json` along with the per-watch list of seen video ids and an inbox. Every write goes through `update()`, a read-modify-write under a `mkdir` lock directory (stale after 2 min), so the launchd job and the MCP server can't clobber each other.
+
+Scheduling is stateless: `runDue()` runs every watch whose `lastRunAt + everyMinutes` has passed. Anything can drive it: launchd (`installScheduler` writes `~/Library/LaunchAgents/dev.clipswarm.watch.plist`, which runs `watch run` every 5 min with the installer's `PATH`), cron, `watch daemon`, or an agent calling `run_watch`.
+
+One run (`runWatch`):
+
+1. **Search.** yt-dlp `--flat-playlist` on a `results?search_query=…&sp=CAI%3D` (newest first) URL. Duration and view filters use the flat data; unseen ids continue.
+2. **Qualify.** Full metadata per candidate gives the upload time, so videos past `maxAgeHours` are marked seen and skipped, until `maxVideosPerRun` are picked.
+3. **Transcript.** YouTube captions (retried; they often 429 under load), else `transcribeUrl` downloads only the audio and runs whisper.cpp, grouped into lines by `wordsToSegments`.
+4. **Pick moments** (`chooseMoments`), best first:
+   - **AI.** `pickWithAI` runs `claude -p --output-format json --tools "" --strict-mcp-config --no-session-persistence` with the prompt on stdin. `buildPickPrompt` bounds it to ~100k characters; `parsePicks` validates the returned JSON (numbers, min length, no overlaps).
+   - **Most replayed.** `pickMoments` takes the top non-overlapping heatmap buckets (skipping the intro spike and outro), and `snapToSentences` moves the edges to caption boundaries. In practice YouTube only publishes heatmaps once a video is several days old, which is why AI is first.
+   - **Transcript heuristic.** `pickFromTranscript` scores sliding windows for questions, numbers, strong words and words-per-second.
+5. **Clip.** All picked videos render in parallel through `createClips` (shared limiter). The inbox records the paths and how moments were picked. A macOS notification fires via `osascript`.
+

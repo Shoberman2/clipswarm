@@ -21,6 +21,7 @@ OpusClip-style apps decide for you what's "viral". clipswarm gives **your agent*
 - **Viral format built in**: 1080×1920, a hook header card, the **whole** video frame (never cropped or zoomed), and animated captions that highlight each word as it's spoken. The layout adapts to the source's shape.
 - **YouTube videos *and* live streams**: clip what just happened on a live stream (`start: -60, end: "now"`), or what aired at 8:41pm.
 - **Captions from real word timings**: YouTube's auto-captions for regular videos, and local [whisper.cpp](https://github.com/ggml-org/whisper.cpp) for live streams. Free and offline.
+- **Runs on autopilot**: give it a category and a schedule ("netflix stock, every 6h"), and it finds new videos, has AI pick the moments and write the hooks, and renders the clips in the background.
 - **Built for swarms**: dozens of parallel jobs across many videos and many simultaneous agents, all through one shared queue. Transcripts are fetched once per video, and one bad job never sinks a batch.
 - **Fast and frugal**: downloads only the seconds you clip (not the whole 3-hour stream), and uses hardware encoding on macOS.
 - **Works with any ffmpeg**: text is rendered by clipswarm itself, so stock builds without `drawtext`/`libass` (e.g. Homebrew's) work fine.
@@ -101,6 +102,41 @@ Paste a link to a stream that's live right now (a `watch?v=` or a channel's `/li
 - Plain live clips are stream-copied for speed and start on the previous keyframe (≤5s early). `live.from` / `live.to` in the result give the exact wall-clock range. Use `precise: true` for frame-accurate cuts. Viral clips are always frame-accurate.
 - `end` can't be in the future. Retry once it has aired.
 
+## Watches: clips that find themselves
+
+Give clipswarm a category and a schedule. It searches YouTube for new videos, picks the best moments, and renders them as viral clips while you're away. A Mac notification appears when new clips land.
+
+```bash
+clipswarm watch add "netflix stock analysis" --every 6h          # what to look for, how often
+clipswarm watch install                                          # background job (launchd on macOS)
+clipswarm watch run --force                                      # or run it right now
+clipswarm watch inbox                                            # what it found and clipped
+```
+
+Or just ask your agent: *"Watch for new AI agent news videos every 12 hours and clip the best moments."* (MCP tools: `create_watch`, `list_watches`, `run_watch`, `get_inbox`, `update_inbox_item`, `delete_watch`, `watch_scheduler`.)
+
+**How it picks moments**, best first:
+
+1. **AI.** If the [Claude Code](https://claude.com/claude-code) CLI is installed, Claude reads the transcript, picks self-contained moments and writes a hook for each header (e.g. *"Netflix at $67, but this model says $127"*). This runs on your own Claude account.
+2. **Most replayed.** YouTube's replay peaks, on videos old enough to have them (usually several days).
+3. **Transcript heuristic.** Free and offline: it scores stretches for questions, numbers, strong claims and energy.
+
+If YouTube's captions are missing or rate-limited, the watcher downloads just the audio and transcribes it with whisper.cpp. Anything it can't clip lands in the inbox as `needs_agent` for your agent to handle.
+
+| Option | Default | |
+|---|---|---|
+| `--every` | `6h` | `30m`, `6h`, `1d`… (min 5m) |
+| `--max-age` | `72h` | Only videos uploaded within this window |
+| `--min-views` | none | Skip small videos |
+| `--videos` | `3` | New videos per run |
+| `--clips` / `--seconds` | `2` / `45` | Clips per video, target length |
+| `--picker` | `auto` | `ai`, `heatmap` or `transcript` to force one |
+| `--live` | off | Also list streams that are live right now in the inbox |
+| `--no-auto` | off | Only collect videos; don't clip |
+| `--out` | `~/clipswarm/<id>` | Where clips go |
+
+State lives in `~/.clipswarm/` (`CLIPSWARM_HOME` to move it). Each video is only processed once. On Linux, `watch install` prints a crontab line, and `clipswarm watch daemon` runs a foreground loop anywhere.
+
 ## How it works
 
 1. **Find the moment.** The agent calls `get_video_info`, `search_transcript` and `get_transcript`. Transcripts come from YouTube's captions via yt-dlp and are cached.
@@ -121,6 +157,8 @@ Contributors: see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for a full walkth
 | `search_transcript` | Where a phrase is said, as padded time windows ready to clip |
 | `create_clips` | Cuts many clips in parallel across any number of videos, live or not. Options: `style`, `title`, `captions`, `accent`, `background`, `label`, `vertical`, `maxHeight`, `precise` |
 | `get_clips` | Collects results from a batch still rendering. `create_clips` returns after ~40s with a `jobId` so MCP clients' ~60s timeouts never kill long batches |
+| `create_watch`, `list_watches`, `delete_watch`, `run_watch` | Manage scheduled YouTube topic searches and optional automatic clipping |
+| `get_inbox`, `update_inbox_item`, `watch_scheduler` | Review videos that need an agent and manage the opt-in background scheduler |
 
 ## CLI
 
@@ -133,6 +171,20 @@ clipswarm search <url> stay hungry
 clipswarm transcript <url>
 clipswarm setup
 ```
+
+## Scheduled watches
+
+Watches search YouTube for recently uploaded videos in a category and can clip their strongest moments. Video searches and clipping happen only when you run a watch or install the background scheduler; adding a watch only saves its settings.
+
+```bash
+clipswarm watch add "AI research" --every 6h
+clipswarm watch list
+clipswarm watch run ai-research
+clipswarm watch inbox
+clipswarm watch remove ai-research
+```
+
+Automatic clipping is on by default. The default `--picker auto` uses the local Claude Code CLI when available, then falls back to YouTube replay peaks or a transcript heuristic. That Claude CLI call uses its configured account and may consume its usage allowance; use `--picker heatmap` or `--picker transcript` to avoid it. Use `--no-auto` to put discovered videos in the inbox for an AI agent to review instead. Videos that cannot be picked automatically, plus live streams when `--live` is enabled, go to the inbox. `clipswarm watch install` opts into a macOS launchd job that checks for due watches every five minutes; `clipswarm watch uninstall` removes that job. Watch state is stored in `~/.clipswarm/state.json` (set `CLIPSWARM_HOME` to use another location).
 
 ## Configuration
 

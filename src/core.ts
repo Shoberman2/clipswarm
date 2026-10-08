@@ -168,7 +168,7 @@ export function exec(cmd: string, args: string[]): Promise<string> {
 const RETRIES = numericEnv("CLIPSWARM_RETRIES", 3, (n) => Number.isInteger(n) && n >= 0, "a non-negative integer");
 
 /** YouTube intermittently 403s individual stream requests; a fresh attempt usually succeeds. */
-async function withRetry<T>(fn: () => Promise<T>): Promise<T> {
+export async function withRetry<T>(fn: () => Promise<T>): Promise<T> {
   for (let attempt = 0; ; attempt++) {
     try {
       return await fn();
@@ -185,7 +185,7 @@ let jsRuntimeArgs: Promise<string[]> | undefined;
  * yt-dlp needs a JavaScript runtime to download from YouTube and only enables
  * Deno by default. Node is always present when clipswarm runs, so offer it.
  */
-function ytdlp(args: string[]): Promise<string> {
+export function ytdlp(args: string[]): Promise<string> {
   jsRuntimeArgs ??= exec("yt-dlp", ["--help"]).then(
     (help) => (help.includes("--js-runtimes") ? ["--js-runtimes", `node:${process.execPath}`] : []),
     () => [],
@@ -195,8 +195,14 @@ function ytdlp(args: string[]): Promise<string> {
 
 // ---------- video info + transcript ----------
 
-interface RawInfo {
+export interface RawInfo {
   id: string;
+  /** Upload time, unix seconds. */
+  timestamp?: number | null;
+  release_timestamp?: number | null;
+  view_count?: number | null;
+  /** YouTube's "Most replayed" curve: ~100 buckets with a 0..1 value. */
+  heatmap?: { start_time: number; end_time: number; value: number }[] | null;
   title: string;
   channel?: string;
   uploader?: string;
@@ -224,7 +230,7 @@ interface RawFormat {
 const infoCache = new Map<string, { at: number; p: Promise<RawInfo> }>();
 const LIVE_INFO_TTL_MS = 20_000;
 
-async function getRawInfo(url: string): Promise<RawInfo> {
+export async function getRawInfo(url: string): Promise<RawInfo> {
   const hit = infoCache.get(url);
   if (hit) {
     const info = await hit.p;
@@ -300,8 +306,11 @@ async function fetchTranscript(url: string, lang: string, prefer: "manual" | "au
         : `No "${lang}" captions available for this video.`,
     );
 
-  const res = await fetch(track.url);
-  if (!res.ok) throw new Error(`Caption download failed: HTTP ${res.status}`);
+  const res = await withRetry(async () => {
+    const r = await fetch(track.url);
+    if (!r.ok) throw new Error(`Caption download failed: HTTP ${r.status}${r.status === 429 ? " (YouTube is rate-limiting caption requests)" : ""}`);
+    return r;
+  });
   const data = (await res.json()) as {
     events?: { tStartMs?: number; dDurationMs?: number; segs?: { utf8: string; tOffsetMs?: number }[] }[];
   };
@@ -372,7 +381,7 @@ export async function searchTranscript(
 
 // ---------- clipping ----------
 
-function slug(s: string): string {
+export function slug(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 80) || "clip";
 }
 

@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { createClip, formatTime, getTranscript, getVideoInfo, parseTime, searchTranscript, type ClipResult } from "./core.js";
 
 const json = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] });
@@ -174,6 +175,126 @@ export async function startMcpServer(defaultOutDir: string) {
       const batch = batches.get(jobId);
       if (!batch) return fail(new Error(`Unknown jobId "${jobId}". Jobs are kept in memory until the server restarts.`));
       return json(await report(jobId, batch, waitSec));
+    },
+  );
+
+  // ---------- watches ----------
+
+  const statuses = ["clipped", "needs_agent", "live", "failed", "done", "dismissed"] as const;
+
+  server.registerTool(
+    "create_watch",
+    {
+      description:
+        "Watch a category: on a schedule, search YouTube for new videos about it and auto-clip the best moments into viral shorts (moments and hooks picked by the local Claude Code CLI if installed, else YouTube's most-replayed peaks, else a transcript heuristic). Anything it can't clip (and live streams, if enabled) goes to the inbox for you. Replaces a watch with the same id. Runs via the background scheduler (see watch_scheduler).",
+      inputSchema: {
+        query: z.string().describe('The category, phrased like a YouTube search, e.g. "netflix stock analysis"'),
+        every: z.string().describe('How often to check: "30m", "6h", "1d" (min 5m)'),
+        id: z.string().optional().describe("Short name; defaults to a slug of the query"),
+        maxAgeHours: z.number().optional().describe("Only videos uploaded within this many hours (default 72)"),
+        minViews: z.number().optional(),
+        minDurationSec: z.number().optional().describe("Default 120 (skips Shorts)"),
+        maxDurationSec: z.number().optional().describe("Default 14400"),
+        maxVideosPerRun: z.number().optional().describe("Default 3"),
+        clipsPerVideo: z.number().optional().describe("Default 2"),
+        clipSeconds: z.number().optional().describe("Target clip length, default 45"),
+        style: z.enum(["viral", "plain"]).optional(),
+        autoClip: z.boolean().optional().describe("Default true. false = only collect videos into the inbox"),
+        picker: z.enum(["auto", "ai", "heatmap", "transcript"]).optional().describe('How moments are chosen. Default "auto"'),
+        includeLive: z.boolean().optional().describe("Also surface streams that are live right now"),
+        outDir: z.string().optional().describe("Default ~/clipswarm/<id>"),
+      },
+    },
+    async ({ every, ...rest }) => {
+      try {
+        const w = await import("./watch.js");
+        const watch = await w.addWatch({ ...rest, everyMinutes: w.parseInterval(every) });
+        const sched = await w.schedulerStatus();
+        return json({ watch, scheduler: sched.detail, ...(sched.installed ? {} : { next: "Call watch_scheduler with action \"install\" so it runs in the background." }) });
+      } catch (e) {
+        return fail(e);
+      }
+    },
+  );
+
+  server.registerTool(
+    "list_watches",
+    { description: "List watches with their schedule, last and next run, plus scheduler status.", inputSchema: {} },
+    async () => {
+      const w = await import("./watch.js");
+      return json({ watches: await w.listWatches(), scheduler: (await w.schedulerStatus()).detail });
+    },
+  );
+
+  server.registerTool(
+    "delete_watch",
+    { description: "Stop and remove a watch.", inputSchema: { id: z.string() } },
+    async ({ id }) => {
+      const w = await import("./watch.js");
+      return json({ removed: await w.removeWatch(id) });
+    },
+  );
+
+  server.registerTool(
+    "run_watch",
+    {
+      description:
+        "Run a watch right now instead of waiting for its schedule. Runs in the background (searching and rendering takes minutes); check get_inbox afterwards.",
+      inputSchema: { id: z.string() },
+    },
+    async ({ id }) => {
+      const w = await import("./watch.js");
+      if (!(await w.listWatches()).some((x) => x.id === id)) return fail(new Error(`No watch "${id}".`));
+      void w.runWatch(id).catch(() => {});
+      return json({ started: true, next: `Call get_inbox with watchId "${id}" in a minute or two.` });
+    },
+  );
+
+  server.registerTool(
+    "get_inbox",
+    {
+      description:
+        'Videos found by watches. "clipped" = auto-clipped (paths in clips; note says how moments were picked). "needs_agent" = couldn\'t be clipped automatically: read the transcript, pick moments, call create_clips, then mark it "done". "live" = streaming now. "failed" = see note.',
+      inputSchema: {
+        status: z.enum(statuses).optional(),
+        watchId: z.string().optional(),
+        limit: z.number().optional().describe("Most recent N, default 30"),
+      },
+    },
+    async ({ status, watchId, limit }) => {
+      const w = await import("./watch.js");
+      return json((await w.getInbox({ status, watchId })).slice(-(limit ?? 30)));
+    },
+  );
+
+  server.registerTool(
+    "update_inbox_item",
+    {
+      description: 'Mark an inbox video as handled ("done") or not worth clipping ("dismissed").',
+      inputSchema: { videoId: z.string(), status: z.enum(statuses), note: z.string().optional() },
+    },
+    async ({ videoId, status, note }) => {
+      const w = await import("./watch.js");
+      return json({ updated: await w.setInboxStatus(videoId, status, note) });
+    },
+  );
+
+  server.registerTool(
+    "watch_scheduler",
+    {
+      description:
+        "Status, install or uninstall the background job that runs due watches every 5 minutes (launchd on macOS; returns a crontab line elsewhere). Install only when the user wants watches to run automatically.",
+      inputSchema: { action: z.enum(["status", "install", "uninstall"]) },
+    },
+    async ({ action }) => {
+      try {
+        const w = await import("./watch.js");
+        if (action === "install") return json({ result: await w.installScheduler(fileURLToPath(new URL("./cli.js", import.meta.url))) });
+        if (action === "uninstall") return json({ result: await w.uninstallScheduler() });
+        return json(await w.schedulerStatus());
+      } catch (e) {
+        return fail(e);
+      }
     },
   );
 
