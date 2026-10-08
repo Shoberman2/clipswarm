@@ -2,10 +2,34 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import path from "node:path";
-import { createClips, formatTime, getTranscript, getVideoInfo, parseTime, searchTranscript } from "./core.js";
+import { createClip, formatTime, getTranscript, getVideoInfo, parseTime, searchTranscript, type ClipResult } from "./core.js";
 
 const json = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] });
 const fail = (e: unknown) => ({ content: [{ type: "text" as const, text: `Error: ${(e as Error).message}` }], isError: true });
+
+// Many MCP clients time out tool calls after ~60s, so long batches return
+// early with a jobId and the agent collects the rest via get_clips.
+const DEFAULT_WAIT = 40;
+
+interface Batch {
+  results: (ClipResult | undefined)[];
+  done: number;
+  all?: Promise<void>;
+}
+
+const batches = new Map<string, Batch>();
+
+async function report(jobId: string, batch: Batch, waitSec = DEFAULT_WAIT) {
+  await Promise.race([batch.all, new Promise((r) => setTimeout(r, Math.max(0, waitSec) * 1000))]);
+  const finished = batch.results.filter((r): r is ClipResult => r !== undefined);
+  const pending = batch.results.length - finished.length;
+  return {
+    ...(pending ? { jobId, pending, note: `Still rendering. Call get_clips with jobId "${jobId}".` } : {}),
+    succeeded: finished.filter((r) => r.ok).length,
+    failed: finished.filter((r) => !r.ok).length,
+    results: finished,
+  };
+}
 
 const time = z
   .union([z.string(), z.number()])
@@ -81,7 +105,7 @@ export async function startMcpServer(defaultOutDir: string) {
     "create_clips",
     {
       description:
-        "Cut one or more clips from YouTube videos (including streams that are live right now) in parallel. Only the requested sections are downloaded. Jobs can span different videos. Returns a result per job; failures don't abort the batch. Live results include the wall-clock range covered.",
+        "Cut one or more clips from YouTube videos (including streams that are live right now) in parallel. Only the requested sections are downloaded. Jobs can span different videos. Returns a result per job; failures don't abort the batch. Live results include the wall-clock range covered. Viral clips take ~15-60s each; if the batch isn't done within waitSec, you get finished results plus a jobId: call get_clips with it until pending is 0.",
       inputSchema: {
         clips: z
           .array(
@@ -105,15 +129,51 @@ export async function startMcpServer(defaultOutDir: string) {
           )
           .min(1),
         outDir: z.string().optional().describe(`Output directory, default ${defaultOutDir}`),
+        waitSec: z
+          .number()
+          .optional()
+          .describe(`Seconds to wait before returning, default ${DEFAULT_WAIT}. If clips are still rendering, the response includes a jobId; collect the rest with get_clips.`),
       },
     },
-    async ({ clips, outDir }) => {
-      const results = await createClips(clips, path.resolve(outDir ?? defaultOutDir));
-      return json({
-        succeeded: results.filter((r) => r.ok).length,
-        failed: results.filter((r) => !r.ok).length,
-        results,
-      });
+    async ({ clips, outDir, waitSec }, extra) => {
+      const dir = path.resolve(outDir ?? defaultOutDir);
+      const id = `clips_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+      const batch: Batch = { results: new Array(clips.length), done: 0 };
+      const token = extra._meta?.progressToken;
+      batch.all = Promise.all(
+        clips.map((job, i) =>
+          createClip(job, dir).then((r) => {
+            batch.results[i] = r;
+            batch.done++;
+            if (token !== undefined)
+              void extra
+                .sendNotification({
+                  method: "notifications/progress",
+                  params: { progressToken: token, progress: batch.done, total: clips.length, message: `${r.ok ? "✓" : "✗"} ${job.label ?? job.url}` },
+                })
+                .catch(() => {});
+          }),
+        ),
+      ).then(() => {});
+      batches.set(id, batch);
+      return json(await report(id, batch, waitSec));
+    },
+  );
+
+  server.registerTool(
+    "get_clips",
+    {
+      description:
+        "Get results of a create_clips batch that was still running (create_clips returns a jobId when it doesn't finish within waitSec). Waits up to waitSec for more clips to finish. Call repeatedly until pending is 0.",
+      inputSchema: {
+        jobId: z.string(),
+        waitSec: z.number().optional().describe(`Seconds to wait for completion before returning, default ${DEFAULT_WAIT}`),
+      },
+    },
+    async ({ jobId, waitSec }) => {
+      const batch = batches.get(jobId);
+      if (!batch) return fail(new Error(`Unknown jobId "${jobId}". Jobs are kept in memory until the server restarts.`));
+      return json(await report(jobId, batch, waitSec));
     },
   );
 

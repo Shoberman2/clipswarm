@@ -599,8 +599,9 @@ async function createLiveClip(job: ClipJob, info: RawInfo, outDir: string, t0: n
         ...(reencode ? ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20"] : ["-c:v", "copy"]),
         "-c:a", "aac", "-b:a", "160k",
         "-movflags", "+faststart",
-        finalPath,
+        `${finalPath}.part.mp4`,
       ]);
+      await rename(`${finalPath}.part.mp4`, finalPath);
     } finally {
       await rm(tmp, { recursive: true, force: true });
     }

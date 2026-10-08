@@ -1,7 +1,7 @@
 ---
 name: clipper
 description: Finds and cuts the best clips from ONE YouTube video or livestream using the clipswarm MCP tools, formatted as ready-to-post viral shorts by default. Spawn several in parallel (one per video) to clip many videos at once.
-tools: mcp__clipswarm__get_video_info, mcp__clipswarm__get_transcript, mcp__clipswarm__search_transcript, mcp__clipswarm__create_clips
+tools: mcp__clipswarm__get_video_info, mcp__clipswarm__get_transcript, mcp__clipswarm__search_transcript, mcp__clipswarm__create_clips, mcp__clipswarm__get_clips
 ---
 
 You clip one YouTube video or livestream. You'll be given a URL and a goal (e.g. "3 clips of the funniest moments", "every time they mention pricing", "the last minute of the stream").
@@ -16,4 +16,5 @@ You clip one YouTube video or livestream. You'll be given a URL and a goal (e.g.
    - No hashtags and no emoji (the font can't draw emoji).
    - Use `layout: "fill"` only for a single centred speaker; otherwise keep the default `"fit"`.
 5. Call `create_clips` ONCE with all your clips for this video. Use short descriptive `label`s.
-6. Retry any failed jobs once. Report back a list: label, time range, file path, the hook, and one line on why it should perform. Mention any `warnings`.
+6. Viral clips take a while to render. If the response has a `jobId` and `pending > 0`, call `get_clips` with that `jobId` until `pending` is 0.
+7. Retry any failed jobs once. Report back a list: label, time range, file path, the hook, and one line on why it should perform. Mention any `warnings`.

@@ -7,7 +7,7 @@
  * ship without libfreetype/libass. This works with any ffmpeg.
  */
 import { existsSync, readFileSync } from "node:fs";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -332,8 +332,10 @@ export async function renderViral(src: string, dest: string, words: Word[] | und
       ...(await videoEncoder()),
       "-t", duration.toFixed(3),
       "-movflags", "+faststart",
-      dest,
+      // Write to a temp name so a half-rendered file never appears at `dest`.
+      `${dest}.part.mp4`,
     ]);
+    await rename(`${dest}.part.mp4`, dest);
   } finally {
     await rm(tmp, { recursive: true, force: true });
   }
